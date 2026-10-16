@@ -32,7 +32,7 @@ wss.on('connection', ws => {
       const requestedMode = m.mode === 'deathmatch' ? 'deathmatch' : 'coop';
       if (r.mode && r.mode !== requestedMode) return send(ws, { type: 'error', message: 'Cette salle utilise un autre mode de jeu.' });
       r.mode = requestedMode;
-      const p = { id: ws.id, name, ws, x: (Math.random()-.5)*24, y: 1.7, z: (Math.random()-.5)*24, yaw: 0, pitch: 0, health: 100, kills: 0, deaths: 0, moving: false, sprinting: false, aiming: false, firing: false, map: requestedMap, mode: requestedMode, isHost };
+      const p = { id: ws.id, name, ws, x: (Math.random()-.5)*24, y: 1.7, z: (Math.random()-.5)*24, yaw: 0, pitch: 0, maxHealth: 100, health: 100, kills: 0, deaths: 0, moving: false, sprinting: false, aiming: false, firing: false, map: requestedMap, mode: requestedMode, isHost };
       if (!r.scores) r.scores = new Map(); r.scores.set(p.id, { id:p.id, name:p.name, kills:0, deaths:0 });
       r.players.set(ws.id, p);
       send(ws, { type: 'joined', id: ws.id, room: code, isHost, mode:r.mode, scores:[...r.scores.values()], players: [...r.players.values()].filter(q => q.id !== ws.id).map(publicPlayer), enemies: r.mode === 'deathmatch' ? [] : [...r.enemies.values()] });
@@ -50,7 +50,7 @@ wss.on('connection', ws => {
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
     if (m.type === 'player-health') {
-      p.health = clamp(m.health, 0, 100); broadcast(r, { type: 'player-health', id: p.id, health: p.health }, ws);
+      p.health = clamp(m.health, 0, p.maxHealth || 100); broadcast(r, { type: 'player-health', id: p.id, health: p.health }, ws);
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
     if (m.type === 'score-request') { send(ws, { type:'scoreboard', scores:[...(r.scores?.values() || [])] }); return; }
@@ -58,7 +58,7 @@ wss.on('connection', ws => {
       const now = Date.now(); if (now - ws.lastHit < 75) return; ws.lastHit = now;
       const target = r.players.get(String(m.target || '')); if (!target || target.id === p.id || target.health <= 0) return;
       // Fixed server-side damage; client cannot choose arbitrary damage.
-      const damage = r.mode === 'deathmatch' ? 40 : clamp(m.damage, 1, 70, 34);
+      const damage = r.mode === 'deathmatch' ? 9 : clamp(m.damage, 1, 70, 34);
       target.health = Math.max(0, target.health - damage);
       if (target.health <= 0) {
         const killerScore = r.scores.get(p.id); const victimScore = r.scores.get(target.id);
@@ -99,7 +99,9 @@ wss.on('connection', ws => {
       const ox = clamp(m.x, -100, 100), oy = clamp(m.y, -5, 20, 1.7), oz = clamp(m.z, -100, 100);
       let dx = clamp(m.dx, -1, 1), dy = clamp(m.dy, -1, 1), dz = clamp(m.dz, -1, 1);
       const norm = Math.hypot(dx, dy, dz) || 1; dx /= norm; dy /= norm; dz /= norm;
-      if (now - ws.lastDamageShot >= 95) {
+      const weapon = ['rifle','smg','sniper'].includes(m.weapon) ? m.weapon : 'rifle';
+      const fireGap = weapon === 'smg' ? 75 : weapon === 'sniper' ? 650 : 105;
+      if (now - ws.lastDamageShot >= fireGap) {
         ws.lastDamageShot = now;
         if (r.mode === 'deathmatch') {
           let best = null, bestT = Infinity, bestY = 0;
@@ -114,7 +116,7 @@ wss.on('connection', ws => {
           }
           if (best) {
             const headshot = bestY > best.y - 0.38;
-            const damage = headshot ? 70 : 40;
+            const damage = weapon === 'smg' ? 7 : weapon === 'sniper' ? 25 : 9;
             best.health = Math.max(0, best.health - damage);
             if (best.health <= 0) {
               const killerScore = r.scores.get(p.id), victimScore = r.scores.get(best.id);
@@ -124,7 +126,7 @@ wss.on('connection', ws => {
               send(best.ws, { type: 'player-killed', target: best.id, attacker: p.id });
             } else send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: best.health, damage });
             broadcast(r, { type: 'state', player: publicPlayer(best) });
-            broadcast(r, { type: 'player-hit-confirmed', attacker: p.id, target: best.id, health: best.health, damage, headshot });
+            broadcast(r, { type: 'player-hit-confirmed', attacker: p.id, target: best.id, health: best.health, damage, headshot, weapon });
             broadcast(r, { type: 'scoreboard', scores: [...r.scores.values()] });
           }
         }
