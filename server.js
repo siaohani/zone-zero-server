@@ -101,7 +101,7 @@ wss.on('connection', ws => {
       const norm = Math.hypot(dx, dy, dz) || 1; dx /= norm; dy /= norm; dz /= norm;
       const weapon = ['rifle','smg','sniper'].includes(m.weapon) ? m.weapon : 'rifle';
       const fireGap = weapon === 'smg' ? 75 : weapon === 'sniper' ? 650 : 105;
-      if (now - ws.lastDamageShot >= fireGap) {
+      if (now - ws.lastDamageShot >= fireGap && m.blocked !== true) {
         ws.lastDamageShot = now;
         if (r.mode === 'deathmatch') {
           let best = null, bestT = Infinity, bestY = 0;
