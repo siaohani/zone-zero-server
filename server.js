@@ -77,7 +77,7 @@ wss.on('connection', ws => {
         }else if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*(35+Math.random()*12);z=(Math.random()-.5)*90;}
         else{const a=Math.random()*Math.PI*2,d=38+Math.random()*17;x=Math.cos(a)*d;z=Math.sin(a)*d;}
       }
-      const p = { id: ws.id, name, ws, x, y:1.7, z, yaw:0, pitch:0, maxHealth:100, health:100, kills:0, deaths:0, scoreAlive:true, moving:false, sprinting:false, aiming:false, firing:false, map:requestedMap, mode:requestedMode, team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
+      const p = { id: ws.id, name, ws, x, y:1.7, z, yaw:0, pitch:0, maxHealth:100, health:100, kills:0, deaths:0, moving:false, sprinting:false, aiming:false, firing:false, map:requestedMap, mode:requestedMode, team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
       if (!r.scores) r.scores = new Map(); r.scores.set(p.id, { id:p.id, name:p.name, kills:0, deaths:0, team:p.team });
       r.players.set(ws.id, p); startRound(r);
       send(ws, { type:'joined', id:ws.id, room:code, isHost, mode:r.mode, team:p.team, spawn:{x:p.x,y:p.y,z:p.z}, matchEndsAt:r.matchEndsAt, roundStartsAt:r.roundStartsAt, scores:sortedScores(r), players:[...r.players.values()].filter(q=>q.id!==ws.id).map(publicPlayer), enemies:['deathmatch','team-deathmatch','elimination'].includes(r.mode)?[]:[...r.enemies.values()] });
@@ -99,11 +99,6 @@ wss.on('connection', ws => {
       p.health = clamp(m.health, 0, p.maxHealth || 100); broadcast(r, { type: 'player-health', id: p.id, health: p.health }, ws);
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
-    if (m.type === 'player-death') {
-      if (p.scoreAlive) { p.scoreAlive = false; p.health = 0; const score = r.scores.get(p.id); if (score) score.deaths = (score.deaths || 0) + 1; broadcast(r, { type:'scoreboard', scores:[...r.scores.values()] }); }
-      return;
-    }
-    if (m.type === 'player-respawned') { p.scoreAlive = true; p.health = p.maxHealth || 100; return; }
     if (m.type === 'score-request') { send(ws, { type:'scoreboard', scores:[...(r.scores?.values() || [])] }); return; }
     if (m.type === 'player-hit') {
       if(Date.now()<(r.roundStartsAt||0)||r.matchFinished)return;
@@ -141,11 +136,21 @@ wss.on('connection', ws => {
     if (m.type === 'enemy-hit') {
       if (['deathmatch','team-deathmatch','elimination'].includes(r.mode)) return;
       const id = String(m.id || ''); const enemy = r.enemies.get(id); if (!enemy || enemy.dead) return;
-      const wasAlive = !enemy.dead; const weapon = ['rifle','smg','sniper'].includes(m.weapon) ? m.weapon : 'rifle'; const bodyDamage = weapon === 'smg' ? 5 : weapon === 'sniper' ? 50 : 9; const damage = m.headshot === true ? bodyDamage * 2 : bodyDamage; enemy.hp = Math.max(0, enemy.hp - damage); if (enemy.hp <= 0) enemy.dead = true;
+      const weapon = ['rifle','smg','sniper'].includes(m.weapon) ? m.weapon : 'rifle'; const bodyDamage = weapon === 'smg' ? 5 : weapon === 'sniper' ? 50 : 9; const damage = m.headshot === true ? bodyDamage * 2 : bodyDamage; const wasAlive=!enemy.dead&&enemy.hp>0; enemy.hp = Math.max(0, enemy.hp - damage); if (enemy.hp <= 0) enemy.dead = true;
+      if(wasAlive&&enemy.dead){const score=r.scores.get(p.id);if(score)score.kills++;broadcast(r,{type:'killfeed',killerName:p.name||'Opérateur',victimName:'Hostile',weapon:weapon.toUpperCase(),team:p.team||null});broadcast(r,{type:'scoreboard',scores:sortedScores(r)});}
       const result = { type: 'enemy-hit-result', id, hp: enemy.hp, dead: enemy.dead, killer: p.id };
-      broadcast(r, result);
-      if (wasAlive && enemy.dead) { const score = r.scores.get(p.id); if (score) score.kills = (score.kills || 0) + 1; broadcast(r, { type:'scoreboard', scores:[...r.scores.values()] }); broadcast(r, { type:'killfeed', killerName:p.name || 'Opérateur', victimName:'Hostile', weapon:weapon.toUpperCase(), team:p.team || null }); }
-      return;
+      broadcast(r, result); return;
+    }
+    if (m.type === 'enemy-player-hit') {
+      if (['deathmatch','team-deathmatch','elimination'].includes(r.mode) || r.hostId !== p.id) return;
+      const target=r.players.get(String(m.target||''));
+      if(!target||target.id===p.id||target.health<=0)return;
+      const now=Date.now();if(now-(ws.lastEnemyPlayerHit||0)<650)return;ws.lastEnemyPlayerHit=now;
+      const enemy=r.enemies.get(String(m.enemyId||''));if(!enemy||enemy.dead||Math.hypot(target.x-enemy.x,target.z-enemy.z)>4.5)return;
+      const damage=clamp(m.damage,1,5,3);target.health=Math.max(0,target.health-damage);
+      if(target.health<=0){const score=r.scores.get(target.id);if(score)score.deaths++;send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:0,damage});broadcast(r,{type:'killfeed',killerName:'HOSTILE',victimName:target.name||'Opérateur',weapon:'BOT'});broadcast(r,{type:'scoreboard',scores:sortedScores(r)});}
+      else send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:target.health,damage});
+      broadcast(r,{type:'state',player:publicPlayer(target)});return;
     }
     if (m.type === 'shot') {
       if(Date.now()<(r.roundStartsAt||0)||r.matchFinished)return;
