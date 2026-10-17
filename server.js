@@ -196,3 +196,4 @@ wss.on('connection', ws => {
 });
 const heartbeat=setInterval(()=>{for(const ws of wss.clients){if(ws.isAlive===false){ws.terminate();continue;}ws.isAlive=false;ws.ping();}},25000);heartbeat.unref?.();
 server.listen(PORT, '0.0.0.0', () => console.log('ZONE ZERO server on ' + PORT));
+
