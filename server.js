@@ -36,7 +36,7 @@ function publicPlayer(p) { const { ws, ...out } = p; return out; }
 function clamp(v, min, max, fallback = 0) { const n = Number(v); return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback; }
 function sortedScores(r){const a=[...(r.scores?.values()||[])];if(r.mode==='team-deathmatch'){const totals={red:0,blue:0};for(const x of a)totals[x.team]=(totals[x.team]||0)+(x.kills||0);a.sort((x,y)=>(totals[y.team]||0)-(totals[x.team]||0)||(y.kills||0)-(x.kills||0)||(x.deaths||0)-(y.deaths||0));}else a.sort((x,y)=>(y.kills||0)-(x.kills||0)||(x.deaths||0)-(y.deaths||0));return a;}
 function teamCounts(r){const c={red:0,blue:0};for(const p of r.players.values())if(p.team in c)c[p.team]++;return c;}
-function startRound(r){if(r.matchTimer||r.matchEndsAt)return;r.matchEndsAt=Date.now()+210000;r.matchTimer=setTimeout(()=>{r.matchFinished=true;const scores=sortedScores(r);for(const p of r.players.values())send(p.ws,{type:'match-end',scores,mode:r.mode,teamScores:r.mode==='team-deathmatch'?{red:scores.filter(x=>x.team==='red').reduce((n,x)=>n+x.kills,0),blue:scores.filter(x=>x.team==='blue').reduce((n,x)=>n+x.kills,0)}:null});},210000);r.matchTimer.unref?.();}
+function startRound(r){if(r.matchTimer||r.matchEndsAt)return;r.roundStartsAt=Date.now()+5000;r.matchEndsAt=r.roundStartsAt+210000;for(const p of r.players.values())send(p.ws,{type:'match-tick',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});r.matchTimer=setTimeout(()=>{r.matchStarted=true;for(const p of r.players.values())send(p.ws,{type:'round-start',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});r.matchEndTimer=setTimeout(()=>{r.matchFinished=true;const scores=sortedScores(r);for(const p of r.players.values())send(p.ws,{type:'match-end',scores,mode:r.mode,teamScores:r.mode==='team-deathmatch'?{red:scores.filter(x=>x.team==='red').reduce((n,x)=>n+x.kills,0),blue:scores.filter(x=>x.team==='blue').reduce((n,x)=>n+x.kills,0)}:null});},210000);r.matchEndTimer.unref?.();},5000);r.matchTimer.unref?.();}
 function broadcastTeamCounts(r){broadcast(r,{type:'team-counts',counts:teamCounts(r)});}
 wss.on('connection', ws => {
   ws.id = crypto.randomUUID(); ws.roomCode = null; ws.lastUpdate = 0; ws.lastHit = 0; ws.lastDamageShot = 0; ws.isAlive=true; ws.on('pong',()=>{ws.isAlive=true;});
@@ -44,6 +44,8 @@ wss.on('connection', ws => {
     if (raw.length > 8192) return;
     let m; try { m = JSON.parse(raw); } catch { return; }
     if (m.type === 'ping') { return send(ws, { type: 'pong', sentAt: Number(m.sentAt) || Date.now() }); }
+    if (m.type === 'admin-auth') { const configured=String(process.env.ADMIN_CODE||''); const supplied=String(m.code||'').slice(0,32); ws.isAdmin=!!configured&&supplied===configured; return send(ws,{type:'admin-auth-result',ok:ws.isAdmin}); }
+    if (m.type === 'admin-disconnect-all') { if(!ws.isAdmin)return send(ws,{type:'admin-disconnect-result',ok:false}); const others=[...wss.clients].filter(client=>client!==ws&&client.readyState===WebSocket.OPEN); for(const client of others)send(client,{type:'server-reset',message:'Toutes les parties ont été arrêtées par l’administrateur. Retour au menu.'}); for(const r of rooms.values()){if(r.matchTimer)clearTimeout(r.matchTimer);if(r.matchEndTimer)clearTimeout(r.matchEndTimer);} rooms.clear(); for(const client of others){client.roomCode=null;} send(ws,{type:'admin-disconnect-result',ok:true}); setTimeout(()=>{for(const client of others){try{client.close(4001,'Admin reset');}catch(_){}}},900).unref?.(); return; }
     if (m.type === 'join') {
       const code = String(m.room || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
       const name = String(m.name || 'Opérateur').replace(/[<>]/g, '').slice(0, 18) || 'Opérateur';
@@ -57,22 +59,31 @@ wss.on('connection', ws => {
       if (r.map !== requestedMap) return send(ws, { type: 'error', message: 'Cette salle utilise une autre carte. Choisis la même carte que les autres joueurs.' });
       if (r.mode !== requestedMode) return send(ws, { type: 'error', message: 'Cette salle utilise un autre mode de jeu.' });
       if (r.matchFinished) return send(ws, { type:'error', message:'Cette manche est terminée. Crée une nouvelle salle avec un autre code.' });
-      if (r.players.size >= 12) return send(ws, { type: 'error', message: 'Salle complète.' });
-      if (requestedMode === 'team-deathmatch' && teamCounts(r)[requestedTeam] >= 3) return send(ws,{type:'error',message:'Cette équipe est complète. Choisis l’autre équipe.'});
+      if (r.players.size >= 32) return send(ws, { type: 'error', message: 'Salle complète (32 joueurs maximum).' });
       ws.roomCode = code; ws.playerName = name;
       const isHost = !r.hostId; if (isHost) r.hostId = ws.id;
       let x,z;
-      if(requestedMode==='team-deathmatch'){x=requestedTeam==='red'?-42:42;z=(Math.random()-.5)*70;}
+      if(requestedMap==='shipment'){
+        if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*22;z=(Math.random()-.5)*8;}
+        else {x=(Math.random()<.5?-1:1)*(20+Math.random()*2);z=(Math.random()<.5?-1:1)*(20+Math.random()*2);}
+      }else if(requestedMode==='team-deathmatch'){x=requestedTeam==='red'?-42:42;z=(Math.random()-.5)*70;}
       else {const angle=Math.random()*Math.PI*2,dist=38+Math.random()*17;x=Math.cos(angle)*dist;z=Math.sin(angle)*dist;}
       // Avoid spawning too close to another player whenever possible.
-      for(let i=0;i<24;i++){if([...r.players.values()].every(q=>Math.hypot(q.x-x,q.z-z)>18))break;if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*(35+Math.random()*12);z=(Math.random()-.5)*90;}else{const a=Math.random()*Math.PI*2,d=38+Math.random()*17;x=Math.cos(a)*d;z=Math.sin(a)*d;}}
+      for(let i=0;i<24;i++){
+        if([...r.players.values()].every(q=>Math.hypot(q.x-x,q.z-z)>(requestedMap==='shipment'?7:18)))break;
+        if(requestedMap==='shipment'){
+          if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*22;z=(Math.random()-.5)*8;}
+          else {x=(Math.random()<.5?-1:1)*(20+Math.random()*2);z=(Math.random()<.5?-1:1)*(20+Math.random()*2);}
+        }else if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*(35+Math.random()*12);z=(Math.random()-.5)*90;}
+        else{const a=Math.random()*Math.PI*2,d=38+Math.random()*17;x=Math.cos(a)*d;z=Math.sin(a)*d;}
+      }
       const p = { id: ws.id, name, ws, x, y:1.7, z, yaw:0, pitch:0, maxHealth:100, health:100, kills:0, deaths:0, moving:false, sprinting:false, aiming:false, firing:false, map:requestedMap, mode:requestedMode, team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
       if (!r.scores) r.scores = new Map(); r.scores.set(p.id, { id:p.id, name:p.name, kills:0, deaths:0, team:p.team });
       r.players.set(ws.id, p); startRound(r);
-      send(ws, { type:'joined', id:ws.id, room:code, isHost, mode:r.mode, team:p.team, spawn:{x:p.x,y:p.y,z:p.z}, matchEndsAt:r.matchEndsAt, scores:sortedScores(r), players:[...r.players.values()].filter(q=>q.id!==ws.id).map(publicPlayer), enemies:['deathmatch','team-deathmatch','elimination'].includes(r.mode)?[]:[...r.enemies.values()] });
+      send(ws, { type:'joined', id:ws.id, room:code, isHost, mode:r.mode, team:p.team, spawn:{x:p.x,y:p.y,z:p.z}, matchEndsAt:r.matchEndsAt, roundStartsAt:r.roundStartsAt, scores:sortedScores(r), players:[...r.players.values()].filter(q=>q.id!==ws.id).map(publicPlayer), enemies:['deathmatch','team-deathmatch','elimination'].includes(r.mode)?[]:[...r.enemies.values()] });
       broadcast(r, { type:'join', player:publicPlayer(p), scores:sortedScores(r), teamCounts:teamCounts(r) }, ws);
       broadcast(r, { type:'count', count:r.players.size }); broadcastTeamCounts(r);
-      for(const player of r.players.values())send(player.ws,{type:'match-tick',endsAt:r.matchEndsAt});
+      for(const player of r.players.values())send(player.ws,{type:'match-tick',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});
       return;
     }
     if (!ws.roomCode) return;
@@ -90,17 +101,18 @@ wss.on('connection', ws => {
     }
     if (m.type === 'score-request') { send(ws, { type:'scoreboard', scores:[...(r.scores?.values() || [])] }); return; }
     if (m.type === 'player-hit') {
+      if(Date.now()<(r.roundStartsAt||0)||r.matchFinished)return;
       const now = Date.now(); if (now - ws.lastHit < 75) return; ws.lastHit = now;
       const target = r.players.get(String(m.target || '')); if (!target || target.id === p.id || target.health <= 0 || r.matchFinished) return; if(r.mode==='team-deathmatch'&&target.team===p.team)return;
       // Fixed server-side damage; client cannot choose arbitrary damage.
-      const damage = ['deathmatch','team-deathmatch'].includes(r.mode) ? 9 : clamp(m.damage, 1, 70, 34);
+      const hitWeapon = ['rifle','smg','sniper'].includes(m.weapon) ? m.weapon : 'rifle'; const damage = ['deathmatch','team-deathmatch','elimination'].includes(r.mode) ? (hitWeapon==='smg'?5:hitWeapon==='sniper'?50:9) : clamp(m.damage, 1, 70, hitWeapon==='smg'?5:hitWeapon==='sniper'?50:9);
       target.health = Math.max(0, target.health - damage);
       if (target.health <= 0) {
         const killerScore = r.scores.get(p.id); const victimScore = r.scores.get(target.id);
         if (killerScore) killerScore.kills++;
         if (victimScore) victimScore.deaths++;
         send(target.ws, { type: 'player-damaged', target: target.id, attacker: p.id, health: 0, damage });
-        send(target.ws, { type: 'player-killed', target: target.id, attacker: p.id, attackerName: p.name || 'Opérateur' });
+        send(target.ws, { type: 'player-killed', target: target.id, attacker: p.id, attackerName: p.name || 'Opérateur' }); broadcast(r,{type:'killfeed',killerName:p.name||'Opérateur',victimName:target.name||'Opérateur',weapon:String(m.weapon||'AR-5'),team:p.team||null});
       } else send(target.ws, { type: 'player-damaged', target: target.id, attacker: p.id, health: target.health, damage });
       broadcast(r, { type: 'state', player: publicPlayer(target) });
       broadcast(r, { type: 'player-hit-confirmed', attacker: p.id, target: target.id, health: target.health, damage });
@@ -124,18 +136,19 @@ wss.on('connection', ws => {
     if (m.type === 'enemy-hit') {
       if (['deathmatch','team-deathmatch','elimination'].includes(r.mode)) return;
       const id = String(m.id || ''); const enemy = r.enemies.get(id); if (!enemy || enemy.dead) return;
-      const damage = clamp(m.damage, 1, 70, 34); enemy.hp = Math.max(0, enemy.hp - damage); if (enemy.hp <= 0) enemy.dead = true;
+      const weapon = ['rifle','smg','sniper'].includes(m.weapon) ? m.weapon : 'rifle'; const bodyDamage = weapon === 'smg' ? 5 : weapon === 'sniper' ? 50 : 9; const damage = m.headshot === true ? bodyDamage * 2 : bodyDamage; enemy.hp = Math.max(0, enemy.hp - damage); if (enemy.hp <= 0) enemy.dead = true;
       const result = { type: 'enemy-hit-result', id, hp: enemy.hp, dead: enemy.dead, killer: p.id };
       broadcast(r, result); return;
     }
     if (m.type === 'shot') {
+      if(Date.now()<(r.roundStartsAt||0)||r.matchFinished)return;
       const now = Date.now();
       // Normalize shot direction outside the rate-limit branch so tracer broadcast never throws.
       const ox = clamp(m.x, -100, 100), oy = clamp(m.y, -5, 20, 1.7), oz = clamp(m.z, -100, 100);
       let dx = clamp(m.dx, -1, 1), dy = clamp(m.dy, -1, 1), dz = clamp(m.dz, -1, 1);
       const norm = Math.hypot(dx, dy, dz) || 1; dx /= norm; dy /= norm; dz /= norm;
       const weapon = ['rifle','smg','sniper'].includes(m.weapon) ? m.weapon : 'rifle';
-      const fireGap = weapon === 'smg' ? 75 : weapon === 'sniper' ? 650 : 105;
+      const fireGap = weapon === 'smg' ? 60 : weapon === 'sniper' ? 5000 : 105;
       if (now - ws.lastDamageShot >= fireGap && m.blocked !== true) {
         ws.lastDamageShot = now;
         if (['deathmatch','team-deathmatch','elimination'].includes(r.mode)) {
@@ -151,14 +164,15 @@ wss.on('connection', ws => {
           }
           if (best) {
             const headshot = bestY > best.y - 0.38;
-            const damage = weapon === 'smg' ? 7 : weapon === 'sniper' ? 25 : 9;
+            const bodyDamage = weapon === 'smg' ? 5 : weapon === 'sniper' ? 50 : 9;
+            const damage = headshot ? bodyDamage * 2 : bodyDamage;
             best.health = Math.max(0, best.health - damage);
             if (best.health <= 0) {
               const killerScore = r.scores.get(p.id), victimScore = r.scores.get(best.id);
               if (killerScore) killerScore.kills++;
               if (victimScore) victimScore.deaths++;
               send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: 0, damage });
-              send(best.ws, { type: 'player-killed', target: best.id, attacker: p.id, attackerName: p.name || 'Opérateur' });
+              send(best.ws, { type: 'player-killed', target: best.id, attacker: p.id, attackerName: p.name || 'Opérateur' }); broadcast(r,{type:'killfeed',killerName:p.name||'Opérateur',victimName:best.name||'Opérateur',weapon:weapon.toUpperCase(),team:p.team||null});
             } else send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: best.health, damage });
             broadcast(r, { type: 'state', player: publicPlayer(best) });
             broadcast(r, { type: 'player-hit-confirmed', attacker: p.id, target: best.id, health: best.health, damage, headshot, weapon });
@@ -177,7 +191,7 @@ wss.on('connection', ws => {
       r.hostId = r.players.keys().next().value || null;
       if (r.hostId) { const next = r.players.get(r.hostId); next.isHost = true; send(next.ws, { type: 'host-changed', isHost: true }); }
     }
-    if (!r.players.size) { if(r.matchTimer)clearTimeout(r.matchTimer); rooms.delete(ws.roomCode); }
+    if (!r.players.size) { if(r.matchTimer)clearTimeout(r.matchTimer);if(r.matchEndTimer)clearTimeout(r.matchEndTimer);rooms.delete(ws.roomCode); }
   });
 });
 const heartbeat=setInterval(()=>{for(const ws of wss.clients){if(ws.isAlive===false){ws.terminate();continue;}ws.isAlive=false;ws.ping();}},25000);heartbeat.unref?.();
