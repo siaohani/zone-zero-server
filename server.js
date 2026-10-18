@@ -136,11 +136,28 @@ wss.on('connection', ws => {
     if (!ws.roomCode) return;
     const r = rooms.get(ws.roomCode); const p = r?.players.get(ws.id); if (!r || !p) return;
     if (m.type === 'state') {
+      if (r.mode !== 'coop' && p.health <= 0) return;
       const now = Date.now(); if (now - ws.lastUpdate < 50) return; ws.lastUpdate = now;
       p.x = clamp(m.x, -100, 100); p.y = clamp(m.y, -5, 20, 1.7); p.z = clamp(m.z, -100, 100);
       p.yaw = clamp(m.yaw, -20, 20); p.pitch = clamp(m.pitch, -1.6, 1.6);
       p.moving = !!m.moving; p.sprinting = !!m.sprinting; p.aiming = !!m.aiming; p.firing = !!m.firing;
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
+    }
+    if (m.type === 'respawn-request') {
+      if (!['deathmatch','team-deathmatch'].includes(r.mode) || r.matchFinished ||
+          p.health > 0 || !p.deadAt || Date.now()-p.deadAt < 3900) return;
+      const limit = r.map === 'shipment' ? 26.5 : 58.5;
+      const x = clamp(m.x,-limit,limit,p.x), z = clamp(m.z,-limit,limit,p.z);
+      // Reject respawns inside major cover objects; the client already chooses a safe position.
+      const obstructed = mapSolids(r.map).some(c => x > c.x-c.hx-.65 && x < c.x+c.hx+.65 &&
+                                                      z > c.z-c.hz-.65 && z < c.z+c.hz+.65 && c.maxY>1);
+      if (obstructed) return send(ws,{type:'respawn-rejected',reason:'position'});
+      p.x=x;p.y=1.7;p.z=z;p.health=p.maxHealth||100;p.deadAt=0;
+      p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;
+      ws.lastUpdate=0;
+      // The player AND every observer receive exactly the same authoritative new alive state.
+      broadcast(r,{type:'player-respawn',player:publicPlayer(p)});
+      return;
     }
     if (m.type === 'player-health') {
       // In competitive play the server owns health; only a real death allows a timed respawn.
@@ -149,7 +166,7 @@ wss.on('connection', ws => {
         if(clamp(m.health,0,100)!==100)return;
         p.deadAt=0;
       }
-      p.health = clamp(m.health, 0, p.maxHealth || 100); broadcast(r, { type: 'player-health', id: p.id, health: p.health }, ws);
+      p.health = clamp(m.health, 0, p.maxHealth || 100); if(p.health>0&&r.mode!=='coop')broadcast(r,{type:'player-respawn',player:publicPlayer(p)}); broadcast(r, { type: 'player-health', id: p.id, health: p.health }, ws);
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
     if (m.type === 'score-request') { send(ws, { type:'scoreboard', scores:[...(r.scores?.values() || [])] }); return; }
