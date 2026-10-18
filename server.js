@@ -1,6 +1,7 @@
 const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const crypto = require('crypto');
+const { coverBefore } = require('./map-solids');
 const PORT = process.env.PORT || 3001;
 const rooms = new Map();
 const serverStartedAt = Date.now();
@@ -96,11 +97,19 @@ wss.on('connection', ws => {
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
     if (m.type === 'player-health') {
+      // In competitive play the server owns health; only a real death allows a timed respawn.
+      if(r.mode!=='coop') {
+        if(p.health>0 || !p.deadAt || Date.now()-p.deadAt<3900 || r.mode==='elimination')return;
+        if(clamp(m.health,0,100)!==100)return;
+        p.deadAt=0;
+      }
       p.health = clamp(m.health, 0, p.maxHealth || 100); broadcast(r, { type: 'player-health', id: p.id, health: p.health }, ws);
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
     if (m.type === 'score-request') { send(ws, { type:'scoreboard', scores:[...(r.scores?.values() || [])] }); return; }
     if (m.type === 'player-hit') {
+      // Legacy client-reported hits are not authoritative; only validated 'shot' packets deal damage.
+      return;
       if(Date.now()<(r.roundStartsAt||0)||r.matchFinished)return;
       const now = Date.now(); if (now - ws.lastHit < 75) return; ws.lastHit = now;
       const target = r.players.get(String(m.target || '')); if (!target || target.id === p.id || target.health <= 0 || r.matchFinished) return; if(r.mode==='team-deathmatch'&&target.team===p.team)return;
@@ -160,6 +169,7 @@ wss.on('connection', ws => {
       let dx = clamp(m.dx, -1, 1), dy = clamp(m.dy, -1, 1), dz = clamp(m.dz, -1, 1);
       const norm = Math.hypot(dx, dy, dz) || 1; dx /= norm; dy /= norm; dz /= norm;
       const weapon = ['rifle','smg','sniper'].includes(m.weapon) ? m.weapon : 'rifle';
+      if(Math.hypot(ox-p.x,oy-p.y,oz-p.z)>3.8)return;
       const fireGap = weapon === 'smg' ? 60 : weapon === 'sniper' ? 5000 : 105;
       if (now - ws.lastDamageShot >= fireGap && m.blocked !== true) {
         ws.lastDamageShot = now;
@@ -172,7 +182,11 @@ wss.on('connection', ws => {
             const t = cx * dx + cy * dy + cz * dz;
             if (t <= 0 || t > 85 || t >= bestT) continue;
             const ex = cx - dx * t, ey = cy - dy * t, ez = cz - dz * t;
-            if (ex * ex + ey * ey + ez * ez <= 1.05 * 1.05) { best = target; bestT = t; bestY = oy + dy * t; }
+            if (ex * ex + ey * ey + ez * ez <= 1.05 * 1.05) {
+              // Independent server geometry check: shooting through principal walls/containers is forbidden.
+              const origin={x:ox,y:oy,z:oz},dir={x:dx,y:dy,z:dz};
+              if(!coverBefore(r.map,origin,dir,t)) {best = target; bestT = t; bestY = oy + dy * t;}
+            }
           }
           if (best) {
             const headshot = bestY > best.y - 0.38;
@@ -180,6 +194,7 @@ wss.on('connection', ws => {
             const damage = headshot ? bodyDamage * 2 : bodyDamage;
             best.health = Math.max(0, best.health - damage);
             if (best.health <= 0) {
+              best.deadAt=now;
               const killerScore = r.scores.get(p.id), victimScore = r.scores.get(best.id);
               if (killerScore) killerScore.kills++;
               if (victimScore) victimScore.deaths++;
