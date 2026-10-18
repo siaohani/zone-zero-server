@@ -1,7 +1,51 @@
+'use strict';
 const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const crypto = require('crypto');
-const { coverBefore } = require('./map-solids');
+// Collisions des cartes integrees directement au serveur.
+// Aucun fichier map-solids.js externe n'est requis.
+// Stable, server-authoritative major cover: matching the physical arena props.
+// The client additionally tests detail meshes / all small cover locally.
+const rect=(x,z,w,d,h,y=0)=>({x,z,hx:w/2,hz:d/2,minY:y,maxY:y+h});
+function mapSolids(map){
+ const out=[];const add=(x,z,w,d,h,y=0)=>out.push(rect(x,z,w,d,h,y));
+ if(map==='shipment'){
+  for(const [x,z,w,d] of [[0,-28,58,1],[0,28,58,1],[-28,0,1,58],[28,0,1,58]])add(x,z,w,d,3.6);
+  for(const [x,z,w,d] of [[-8,-18,12,3.6],[8,-18,12,3.6],[-19,-5,3.6,11],[19,5,3.6,11],[0,0,12,3.6],[-8,18,12,3.6],[8,18,12,3.6],[-19,16,3.6,6.5],[19,-16,3.6,6.5]])add(x,z,w,d,3.15);
+  for(const [x,z,w,d] of [[-8,-8,3.4,1.1],[8,8,3.4,1.1],[-8,8,3.4,1.1],[8,-8,3.4,1.1]])add(x,z,w,d,.95);
+ } else if(map==='blacksite'){
+  for(const [x,z,w,d] of [[0,-61,126,2],[0,61,126,2],[-62,0,2,124],[62,0,2,124]])add(x,z,w,d,3.4);
+  for(const [x,z,w,d] of [[-20,-39,22,22],[20,-39,22,22],[0,-51,44,2],[-14,-27,12,2],[14,-27,12,2]])add(x,z,w,d,8);
+  for(const [x,z] of [[-27,37],[-27,29],[27,37],[27,29],[-40,13],[-40,5],[40,13],[40,5],[-25,-7],[-25,-15],[25,-7],[25,-15],[-40,-34],[40,-34],[-28,-49],[28,-49]])add(x,z,12,3.5,3.1);
+  for(const [x,z,w] of [[-12,24,7],[12,24,7],[-12,2,7],[12,2,7],[-13,-24,8],[13,-24,8],[-9,-47,6],[9,-47,6]])add(x,z,w,.75,1.05);
+  for(const [x,z] of [[-18,15],[18,15],[-18,-9],[18,-9],[-8,-34],[8,-34]])add(x,z,1.8,1.8,1.1);
+  for(const [x,z] of [[-47,25],[47,25],[-47,-17],[47,-17],[-16,-54],[16,-54]])add(x,z,2.3,2.1,1.7);
+ } else if(map==='arctic'){
+  for(const [x,z,w,d] of [[0,-61,124,2],[0,61,124,2],[-61,0,2,124],[61,0,2,124]])add(x,z,w,d,3.5);
+  for(const [x,z,w,d,h] of [[-24,-35,18,2,7],[-33,-25,2,20,7],[-15,-25,2,20,7],[-29.75,-15,6.5,2,7],[-18.25,-15,6.5,2,7],[25,-34,18,2,5],[16,-25,2,18,5],[34,-25,2,18,5],[19.25,-16,6.5,2,5],[30.75,-16,6.5,2,5]])add(x,z,w,d,h);
+  for(const [x,z,w,d] of [[-43,17,9,3],[43,17,9,3],[-19,12,7,2],[19,12,7,2],[-42,-5,7,2],[42,-5,7,2],[0,-4,9,2]])add(x,z,w,d,1.3);
+  for(const [x,z] of [[-47,42],[47,42],[-45,-47],[45,-47],[-5,-48],[6,38]])add(x,z,2.2,2.1,1.7);
+  for(const [x,z,w,d] of [[-43,1,5,.65],[43,1,5,.65],[-22,27,4,.65],[22,27,4,.65],[-22,-42,4,.65],[22,-42,4,.65]])add(x,z,w,d,.92);
+ }
+ return out;
+}
+// Ray vs 3D AABB using slabs. Ignore intersections beyond the target.
+const mapCache=new Map();
+function coverBefore(map,origin,dir,distance){
+ let solids=mapCache.get(map);if(!solids){solids=mapSolids(map);mapCache.set(map,solids);}
+ for(const c of solids){
+  let tmin=0,tmax=distance,valid=true;
+  const low=[c.x-c.hx,c.minY,c.z-c.hz],hi=[c.x+c.hx,c.maxY,c.z+c.hz];
+  const start=[origin.x,origin.y,origin.z],v=[dir.x,dir.y,dir.z];
+  for(let i=0;i<3;i++){
+   if(Math.abs(v[i])<1e-9){if(start[i]<low[i]||start[i]>hi[i]){valid=false;break;}}
+   else{let a=(low[i]-start[i])/v[i],b=(hi[i]-start[i])/v[i];if(a>b)[a,b]=[b,a];tmin=Math.max(tmin,a);tmax=Math.min(tmax,b);if(tmin>tmax){valid=false;break;}}
+  }
+  if(valid&&tmax>=0&&tmin<distance-.06)return true;
+ }
+ return false;
+}
+
 const PORT = process.env.PORT || 3001;
 const rooms = new Map();
 const serverStartedAt = Date.now();
@@ -44,6 +88,8 @@ wss.on('connection', ws => {
   ws.on('message', raw => {
     if (raw.length > 8192) return;
     let m; try { m = JSON.parse(raw); } catch { return; }
+    // JSON.parse accepts null and primitives; never let a malformed client packet crash Node.
+    if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.type !== 'string') return;
     if (m.type === 'ping') { return send(ws, { type: 'pong', sentAt: Number(m.sentAt) || Date.now() }); }
     if (m.type === 'admin-auth') { const configured=String(process.env.ADMIN_CODE||''); const supplied=String(m.code||'').slice(0,32); ws.isAdmin=!!configured&&supplied===configured; return send(ws,{type:'admin-auth-result',ok:ws.isAdmin}); }
     if (m.type === 'admin-disconnect-all') { if(!ws.isAdmin)return send(ws,{type:'admin-disconnect-result',ok:false}); const others=[...wss.clients].filter(client=>client!==ws&&client.readyState===WebSocket.OPEN); for(const client of others)send(client,{type:'server-reset',message:'Toutes les parties ont été arrêtées par l’administrateur. Retour au menu.'}); for(const r of rooms.values()){if(r.matchTimer)clearTimeout(r.matchTimer);if(r.matchEndTimer)clearTimeout(r.matchEndTimer);} rooms.clear(); for(const client of others){client.roomCode=null;} send(ws,{type:'admin-disconnect-result',ok:true}); setTimeout(()=>{for(const client of others){try{client.close(4001,'Admin reset');}catch(_){}}},900).unref?.(); return; }
@@ -107,26 +153,8 @@ wss.on('connection', ws => {
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
     if (m.type === 'score-request') { send(ws, { type:'scoreboard', scores:[...(r.scores?.values() || [])] }); return; }
-    if (m.type === 'player-hit') {
-      // Legacy client-reported hits are not authoritative; only validated 'shot' packets deal damage.
-      return;
-      if(Date.now()<(r.roundStartsAt||0)||r.matchFinished)return;
-      const now = Date.now(); if (now - ws.lastHit < 75) return; ws.lastHit = now;
-      const target = r.players.get(String(m.target || '')); if (!target || target.id === p.id || target.health <= 0 || r.matchFinished) return; if(r.mode==='team-deathmatch'&&target.team===p.team)return;
-      // Fixed server-side damage; client cannot choose arbitrary damage.
-      const hitWeapon = ['rifle','smg','sniper'].includes(m.weapon) ? m.weapon : 'rifle'; const damage = ['deathmatch','team-deathmatch','elimination'].includes(r.mode) ? (hitWeapon==='smg'?5:hitWeapon==='sniper'?50:9) : clamp(m.damage, 1, 70, hitWeapon==='smg'?5:hitWeapon==='sniper'?50:9);
-      target.health = Math.max(0, target.health - damage);
-      if (target.health <= 0) {
-        const killerScore = r.scores.get(p.id); const victimScore = r.scores.get(target.id);
-        if (killerScore) killerScore.kills++;
-        if (victimScore) victimScore.deaths++;
-        send(target.ws, { type: 'player-damaged', target: target.id, attacker: p.id, health: 0, damage });
-        send(target.ws, { type: 'player-killed', target: target.id, attacker: p.id, attackerName: p.name || 'Opérateur' }); broadcast(r,{type:'killfeed',killerName:p.name||'Opérateur',victimName:target.name||'Opérateur',weapon:String(m.weapon||'AR-5'),team:p.team||null});
-      } else send(target.ws, { type: 'player-damaged', target: target.id, attacker: p.id, health: target.health, damage });
-      broadcast(r, { type: 'state', player: publicPlayer(target) });
-      broadcast(r, { type: 'player-hit-confirmed', attacker: p.id, target: target.id, health: target.health, damage });
-      broadcast(r, { type:'scoreboard', scores:[...r.scores.values()] }); return;
-    }
+    // Obsolete client-side damage reports are intentionally ignored.
+    if (m.type === 'player-hit') return;
     if (m.type === 'enemy-state') {
       if (['deathmatch','team-deathmatch','elimination'].includes(r.mode)) return;
       if (r.hostId !== ws.id || !Array.isArray(m.enemies)) return;
@@ -211,6 +239,8 @@ wss.on('connection', ws => {
       return;
     }
   });
+  // A network socket error must not become an uncaught EventEmitter error.
+  ws.on('error', err => console.warn('[ZONE ZERO] Socket error:', err.message));
   ws.on('close', () => {
     if (!ws.roomCode) return; const r = rooms.get(ws.roomCode); if (!r) return;
     r.players.delete(ws.id); r.scores?.delete(ws.id); broadcast(r, { type: 'leave', id: ws.id }); broadcast(r, { type: 'count', count: r.players.size }); broadcast(r, {type:'scoreboard',scores:sortedScores(r)}); broadcastTeamCounts(r);
@@ -221,5 +251,10 @@ wss.on('connection', ws => {
     if (!r.players.size) { if(r.matchTimer)clearTimeout(r.matchTimer);if(r.matchEndTimer)clearTimeout(r.matchEndTimer);rooms.delete(ws.roomCode); }
   });
 });
+wss.on('error', err => console.error('[ZONE ZERO] WebSocket server error:', err));
+server.on('error', err => {
+  console.error('[ZONE ZERO] Impossible de démarrer le serveur :', err);
+  process.exitCode = 1;
+});
 const heartbeat=setInterval(()=>{for(const ws of wss.clients){if(ws.isAlive===false){ws.terminate();continue;}ws.isAlive=false;ws.ping();}},25000);heartbeat.unref?.();
-server.listen(PORT, '0.0.0.0', () => console.log('ZONE ZERO server on ' + PORT));
+server.listen(PORT, '0.0.0.0', () => console.log('ZONE ZERO server ready on 0.0.0.0:' + PORT));
