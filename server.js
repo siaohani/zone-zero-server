@@ -2,69 +2,19 @@
 const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 // Collisions des cartes integrees directement au serveur.
 // Aucun fichier map-solids.js externe n'est requis.
-// Stable, server-authoritative major cover: matching the physical arena props.
-// The client additionally tests detail meshes / all small cover locally.
-const rect=(x,z,w,d,h,y=0)=>({x,z,hx:w/2,hz:d/2,minY:y,maxY:y+h});
+// V46.9: these collision volumes are exported from the V46.8 client map-building
+// branch (manual colliders + its grounded BoxGeometry auto-colliders).
+// See tools/extract-map-colliders.cjs to regenerate when maps change.
+// [x,z,halfX,halfZ,minY,maxY] in world coordinates, metres.
+const MAP_COLLIDER_DATA={"blacksite":[[0,-61,63,1,0,0.9],[0,61,63,1,0,0.9],[-62,0,1,62,0,0.9],[62,0,1,62,0,0.9],[-20,-39,11,11,0,0.9],[20,-39,11,11,0,0.9],[0,-51,22,1,0,0.9],[-14,-27,6,1,0,0.9],[14,-27,6,1,0,0.9],[-27,37,6.15,1.93,0,0.9],[-27,29,6.15,1.93,0,0.9],[27,37,6.15,1.93,0,0.9],[27,29,6.15,1.93,0,0.9],[-40,13,6.15,1.93,0,0.9],[-40,5,6.15,1.93,0,0.9],[40,13,6.15,1.93,0,0.9],[40,5,6.15,1.93,0,0.9],[-25,-7,6.15,1.93,0,0.9],[-25,-15,6.15,1.93,0,0.9],[25,-7,6.15,1.93,0,0.9],[25,-15,6.15,1.93,0,0.9],[-40,-34,6.15,1.93,0,0.9],[40,-34,6.15,1.93,0,0.9],[-28,-49,6.15,1.93,0,0.9],[28,-49,6.15,1.93,0,0.9],[-12,24,3.6,0.48,0,0.9],[12,24,3.6,0.48,0,0.9],[-12,2,3.6,0.48,0,0.9],[12,2,3.6,0.48,0,0.9],[-13,-24,4.1,0.48,0,0.9],[13,-24,4.1,0.48,0,0.9],[-9,-47,3.1,0.48,0,0.9],[9,-47,3.1,0.48,0,0.9],[-18,15,0.9,0.9,0,0.9],[18,15,0.9,0.9,0,0.9],[-18,-9,0.9,0.9,0,0.9],[18,-9,0.9,0.9,0,0.9],[-8,-34,0.9,0.9,0,0.9],[8,-34,0.9,0.9,0,0.9],[-47,25,1.2,1.1,0,0.9],[47,25,1.2,1.1,0,0.9],[-47,-17,1.2,1.1,0,0.9],[47,-17,1.2,1.1,0,0.9],[-16,-54,1.2,1.1,0,0.9],[16,-54,1.2,1.1,0,0.9],[-48,0,1.45,0.95,0,0.9],[48,0,1.45,0.95,0,0.9],[-18,44,1.45,0.95,0,0.9],[18,44,1.45,0.95,0,0.9],[-18,-34,1.45,0.95,0,0.9],[18,-34,1.45,0.95,0,0.9],[-34,3,2.05,0.4,0,0.9],[34,3,2.05,0.4,0,0.9],[-34,-23,2.05,0.4,0,0.9],[34,-23,2.05,0.4,0,0.9],[-8,47,2.05,0.4,0,0.9],[8,47,2.05,0.4,0,0.9],[-62,0,1,62,-0.15,3.25],[62,0,1,62,-0.15,3.25],[-20,-39,11,11,0,8],[20,-39,11,11,0,8],[0,-51,22,1,0,8],[-14,-27,6,1,0,8],[14,-27,6,1,0,8],[-20,-39,0.12,0.12,0.3,7.8],[-15,-39,0.12,0.12,0.3,7.8],[-10,-39,0.12,0.12,0.3,7.8],[-5,-39,0.12,0.12,0.3,7.8],[0,-39,0.12,0.12,0.3,7.8],[5,-39,0.12,0.12,0.3,7.8],[10,-39,0.12,0.12,0.3,7.8],[15,-39,0.12,0.12,0.3,7.8],[20,-39,0.12,0.12,0.3,7.8],[-27,37,6,1.75,0,3.1],[-27,29,6,1.75,0,3.1],[27,37,6,1.75,0,3.1],[27,29,6,1.75,0,3.1],[-40,13,6,1.75,0,3.1],[-40,5,6,1.75,0,3.1],[40,13,6,1.75,0,3.1],[40,5,6,1.75,0,3.1],[-25,-7,6,1.75,0,3.1],[-25,-15,6,1.75,0,3.1],[25,-7,6,1.75,0,3.1],[25,-15,6,1.75,0,3.1],[-40,-34,6,1.75,0,3.1],[40,-34,6,1.75,0,3.1],[-28,-49,6,1.75,0,3.1],[28,-49,6,1.75,0,3.1],[-12,24,3.5,0.38,0,1.05],[12,24,3.5,0.38,0,1.05],[-12,2,3.5,0.38,0,1.05],[12,2,3.5,0.38,0,1.05],[-13,-24,4,0.38,0,1.05],[13,-24,4,0.38,0,1.05],[-9,-47,3,0.38,0,1.05],[9,-47,3,0.38,0,1.05],[-47,-3,0.35,0.35,0,15],[47,-3,0.35,0.35,0,15],[-53,-48,1.4,1.4,0,5],[53,-48,1.4,1.4,0,5],[-53,43,1.4,1.4,0,5],[53,43,1.4,1.4,0,5],[-47,25,1.15,1.05,0,1.7],[47,25,1.15,1.05,0,1.7],[-47,-17,1.15,1.05,0,1.7],[47,-17,1.15,1.05,0,1.7],[-16,-54,1.15,1.05,0,1.7],[16,-54,1.15,1.05,0,1.7],[-49,18,0.85,0.45,0.26,0.78],[49,18,0.85,0.45,0.26,0.78],[-17,-56,0.85,0.45,0.26,0.78],[17,-56,0.85,0.45,0.26,0.78],[-45,-39,0.85,0.45,0.26,0.78],[45,-39,0.85,0.45,0.26,0.78],[-54.85,-34,0.21,0.16,1.73,2.28],[-54.85,-30,0.21,0.16,1.73,2.28],[-54.85,-26,0.21,0.16,1.73,2.28],[-54.85,-22,0.21,0.16,1.73,2.28],[-54.85,-18,0.21,0.16,1.73,2.28],[-54.85,-14,0.21,0.16,1.73,2.28],[-54.85,-10,0.21,0.16,1.73,2.28],[-54.85,-6,0.21,0.16,1.73,2.28],[-54.85,-2,0.21,0.16,1.73,2.28],[-54.85,2,0.21,0.16,1.73,2.28],[-54.85,6,0.21,0.16,1.73,2.28],[-54.85,10,0.21,0.16,1.73,2.28],[-54.85,14,0.21,0.16,1.73,2.28],[-54.85,18,0.21,0.16,1.73,2.28],[-54.85,22,0.21,0.16,1.73,2.28],[-54.85,26,0.21,0.16,1.73,2.28],[-54.85,30,0.21,0.16,1.73,2.28],[-54.85,34,0.21,0.16,1.73,2.28],[54.85,-34,0.21,0.16,1.73,2.28],[54.85,-30,0.21,0.16,1.73,2.28],[54.85,-26,0.21,0.16,1.73,2.28],[54.85,-22,0.21,0.16,1.73,2.28],[54.85,-18,0.21,0.16,1.73,2.28],[54.85,-14,0.21,0.16,1.73,2.28],[54.85,-10,0.21,0.16,1.73,2.28],[54.85,-6,0.21,0.16,1.73,2.28],[54.85,-2,0.21,0.16,1.73,2.28],[54.85,2,0.21,0.16,1.73,2.28],[54.85,6,0.21,0.16,1.73,2.28],[54.85,10,0.21,0.16,1.73,2.28],[54.85,14,0.21,0.16,1.73,2.28],[54.85,18,0.21,0.16,1.73,2.28],[54.85,22,0.21,0.16,1.73,2.28],[54.85,26,0.21,0.16,1.73,2.28],[54.85,30,0.21,0.16,1.73,2.28],[54.85,34,0.21,0.16,1.73,2.28],[-48,23,0.68,0.63,0.06,1.14],[-47.82,23,0.85,0.63,1.28,2.36],[48,23,0.68,0.63,0.06,1.14],[48.18,23,0.85,0.63,1.28,2.36],[-48,-20,0.68,0.63,0.06,1.14],[-47.82,-20,0.85,0.63,1.28,2.36],[48,-20,0.68,0.63,0.06,1.14],[48.18,-20,0.85,0.63,1.28,2.36],[-19,-55,0.68,0.63,0.06,1.14],[-18.82,-55,0.85,0.63,1.28,2.36],[19,-55,0.68,0.63,0.06,1.14],[19.18,-55,0.85,0.63,1.28,2.36],[-35,19,0.68,0.63,0.06,1.14],[-34.82,19,0.85,0.63,1.28,2.36],[35,19,0.68,0.63,0.06,1.14],[35.18,19,0.85,0.63,1.28,2.36],[-56,32.1,0.15,0.15,0,1.1],[-56,28.1,0.15,0.15,0,1.1],[56,32.1,0.15,0.15,0,1.1],[56,28.1,0.15,0.15,0,1.1],[-56,-14.9,0.15,0.15,0,1.1],[56,-14.9,0.15,0.15,0,1.1],[-47,-8,0.86,0.86,3.2,11.2],[-47,2,0.86,0.86,3.2,11.2],[47,-8,0.86,0.86,3.2,11.2],[47,2,0.86,0.86,3.2,11.2],[-39,34,0.53,0.5,0.08,1.08],[-38.84,34,0.65,0.5,1.13,2.13],[39,34,0.53,0.5,0.08,1.08],[39.16,34,0.65,0.5,1.13,2.13],[-39,-8,0.53,0.5,0.08,1.08],[-38.84,-8,0.65,0.5,1.13,2.13],[39,-8,0.53,0.5,0.08,1.08],[39.16,-8,0.65,0.5,1.13,2.13],[-27,17,0.53,0.5,0.08,1.08],[-26.84,17,0.65,0.5,1.13,2.13],[27,17,0.53,0.5,0.08,1.08],[27.16,17,0.65,0.5,1.13,2.13],[-27,-18,0.53,0.5,0.08,1.08],[-26.84,-18,0.65,0.5,1.13,2.13],[27,-18,0.53,0.5,0.08,1.08],[27.16,-18,0.65,0.5,1.13,2.13],[-52,8,0.43,0.36,0,1.1],[52,8,0.43,0.36,0,1.1],[-52,-27,0.43,0.36,0,1.1],[52,-27,0.43,0.36,0,1.1],[-34,45,0.43,0.36,0,1.1],[34,45,0.43,0.36,0,1.1],[-48.52,-0.31,0.46,0.28,0.14,0.94],[-47.47,-0.31,0.46,0.28,0.14,0.94],[-48.52,0.31,0.46,0.28,0.14,0.86],[-47.47,0.31,0.46,0.28,0.14,0.86],[47.48,-0.31,0.46,0.28,0.14,0.94],[48.53,-0.31,0.46,0.28,0.14,0.94],[47.48,0.31,0.46,0.28,0.14,0.86],[48.53,0.31,0.46,0.28,0.14,0.86],[-18.52,43.69,0.46,0.28,0.14,0.94],[-17.48,43.69,0.46,0.28,0.14,0.94],[-18.52,44.31,0.46,0.28,0.14,0.86],[-17.48,44.31,0.46,0.28,0.14,0.86],[17.48,43.69,0.46,0.28,0.14,0.94],[18.52,43.69,0.46,0.28,0.14,0.94],[17.48,44.31,0.46,0.28,0.14,0.86],[18.52,44.31,0.46,0.28,0.14,0.86],[-18.52,-34.31,0.46,0.28,0.14,0.94],[-17.48,-34.31,0.46,0.28,0.14,0.94],[-18.52,-33.69,0.46,0.28,0.14,0.86],[-17.48,-33.69,0.46,0.28,0.14,0.86],[17.48,-34.31,0.46,0.28,0.14,0.94],[18.52,-34.31,0.46,0.28,0.14,0.94],[17.48,-33.69,0.46,0.28,0.14,0.86],[18.52,-33.69,0.46,0.28,0.14,0.86],[-34,3,2,0.33,0,1],[34,3,2,0.33,0,1],[-34,-23,2,0.33,0,1],[34,-23,2,0.33,0,1],[-8,47,2,0.33,0,1],[8,47,2,0.33,0,1]],"shipment":[[0,-28,29,0.5,0,0.9],[0,28,29,0.5,0,0.9],[-28,0,0.5,29,0,0.9],[28,0,0.5,29,0,0.9],[-8,-18,6.12,1.92,0,0.9],[8,-18,6.12,1.92,0,0.9],[-19,-5,1.92,5.62,0,0.9],[19,5,1.92,5.62,0,0.9],[0,0,6.12,1.92,0,0.9],[-8,18,6.12,1.92,0,0.9],[8,18,6.12,1.92,0,0.9],[-19,16,1.92,3.37,0,0.9],[19,-16,1.92,3.37,0,0.9],[-8,-8,1.75,0.6,0,0.9],[8,8,1.75,0.6,0,0.9],[-8,8,1.75,0.6,0,0.9],[8,-8,1.75,0.6,0,0.9],[0,-28,29,0.5,0,3.6],[0,28,29,0.5,0,3.6],[-28,0,0.5,29,0,3.6],[28,0,0.5,29,0,3.6],[-8,-18,6,1.8,0,3.15],[8,-18,6,1.8,0,3.15],[-19,-5,1.8,5.5,0,3.15],[19,5,1.8,5.5,0,3.15],[0,0,6,1.8,0,3.15],[-8,18,6,1.8,0,3.15],[8,18,6,1.8,0,3.15],[-19,16,1.8,3.25,0,3.15],[19,-16,1.8,3.25,0,3.15],[-8,-8,1.7,0.55,0,0.92],[8,8,1.7,0.55,0,0.92],[-8,8,1.7,0.55,0,0.92],[8,-8,1.7,0.55,0,0.92]],"arctic":[[0,-61,62,1,0,0.9],[0,61,62,1,0,0.9],[-61,0,1,62,0,0.9],[61,0,1,62,0,0.9],[-24,-35,9,1,0,0.9],[-33,-25,1,10,0,0.9],[-15,-25,1,10,0,0.9],[-29.75,-15,3.25,1,0,0.9],[-18.25,-15,3.25,1,0,0.9],[25,-34,9,1,0,0.9],[16,-25,1,9,0,0.9],[34,-25,1,9,0,0.9],[19.25,-16,3.25,1,0,0.9],[30.75,-16,3.25,1,0,0.9],[-43,17,4.5,1.5,0,0.9],[43,17,4.5,1.5,0,0.9],[-19,12,3.5,1,0,0.9],[19,12,3.5,1,0,0.9],[-42,-5,3.5,1,0,0.9],[42,-5,3.5,1,0,0.9],[0,-4,4.5,1,0,0.9],[-47,42,1.2,1.15,0,0.9],[47,42,1.2,1.15,0,0.9],[-45,-47,1.2,1.15,0,0.9],[45,-47,1.2,1.15,0,0.9],[-5,-48,1.2,1.15,0,0.9],[6,38,1.2,1.15,0,0.9],[-29,-29,0.58,0.5,0,0.9],[-19,-29,0.58,0.5,0,0.9],[-29,-22,0.58,0.5,0,0.9],[-19,-22,0.58,0.5,0,0.9],[20,-29,0.58,0.5,0,0.9],[30,-29,0.58,0.5,0,0.9],[20,-22,0.58,0.5,0,0.9],[30,-22,0.58,0.5,0,0.9],[-48,34,0.58,0.5,0,0.9],[48,34,0.58,0.5,0,0.9],[-48,-8,0.58,0.5,0,0.9],[48,-8,0.58,0.5,0,0.9],[-43,30,0.5,0.5,0,0.9],[43,30,0.5,0.5,0,0.9],[-43,-12,0.5,0.5,0,0.9],[43,-12,0.5,0.5,0,0.9],[-30,18,1.55,1,0,0.9],[30,18,1.55,1,0,0.9],[-30,-3,1.55,1,0,0.9],[30,-3,1.55,1,0,0.9],[-30,-43,1.55,1,0,0.9],[30,-43,1.55,1,0,0.9],[-47,8,1.55,1,0,0.9],[47,8,1.55,1,0,0.9],[-43,1,2.55,0.38,0,0.9],[43,1,2.55,0.38,0,0.9],[-22,27,2.05,0.38,0,0.9],[22,27,2.05,0.38,0,0.9],[-22,-42,2.05,0.38,0,0.9],[22,-42,2.05,0.38,0,0.9],[0,-61,62,1,-0.15,3.35],[0,61,62,1,-0.15,3.35],[-61,0,1,62,-0.15,3.35],[61,0,1,62,-0.15,3.35],[-24,-35,9,1,0,7],[-33,-25,1,10,0,7],[-15,-25,1,10,0,7],[-29.75,-15,3.25,1,0,7],[-18.25,-15,3.25,1,0,7],[25,-34,9,1,0,5],[16,-25,1,9,0,5],[34,-25,1,9,0,5],[19.25,-16,3.25,1,0,5],[30.75,-16,3.25,1,0,5],[-43,17,4.5,1.5,0,1.3],[43,17,4.5,1.5,0,1.3],[-19,12,3.5,1,0,1.3],[19,12,3.5,1,0,1.3],[-42,-5,3.5,1,0,1.3],[42,-5,3.5,1,0,1.3],[0,-4,4.5,1,0,1.3],[-47,42,1.1,1.05,0,1.7],[47,42,1.1,1.05,0,1.7],[-45,-47,1.1,1.05,0,1.7],[45,-47,1.1,1.05,0,1.7],[-5,-48,1.1,1.05,0,1.7],[6,38,1.1,1.05,0,1.7],[-35,-3,0.11,0.11,0,12],[-5,-3,0.11,0.11,0,12],[25,-3,0.11,0.11,0,12],[-48,28,1.25,0.85,0,1.5],[48,28,1.25,0.85,0,1.5],[-47,-15,1.25,0.85,0,1.5],[47,-15,1.25,0.85,0,1.5],[-8,-51,1.25,0.85,0,1.5],[8,-51,1.25,0.85,0,1.5],[-48.42,-44,0.61,0.61,1.8,7.6],[-47.58,-44,0.61,0.61,1.8,7.6],[47.58,-44,0.61,0.61,1.8,7.6],[48.42,-44,0.61,0.61,1.8,7.6],[-48.42,45,0.61,0.61,1.8,7.6],[-47.58,45,0.61,0.61,1.8,7.6],[47.58,45,0.61,0.61,1.8,7.6],[48.42,45,0.61,0.61,1.8,7.6],[-0.42,-53,0.61,0.61,1.8,7.6],[0.42,-53,0.61,0.61,1.8,7.6],[-29,-29,0.53,0.46,0,1],[-19,-29,0.53,0.46,0,1],[-29,-22,0.53,0.46,0,1],[-19,-22,0.53,0.46,0,1],[20,-29,0.53,0.46,0,1],[30,-29,0.53,0.46,0,1],[20,-22,0.53,0.46,0,1],[30,-22,0.53,0.46,0,1],[-48,34,0.53,0.46,0,1],[48,34,0.53,0.46,0,1],[-48,-8,0.53,0.46,0,1],[48,-8,0.53,0.46,0,1],[-44,20,0.12,6,0.3,0.54],[44,20,0.12,6,0.3,0.54],[-44,-21,0.12,4.5,0.3,0.54],[44,-21,0.12,4.5,0.3,0.54],[-32.65,-34.08,0.11,0.11,0,7],[-15.35,-34.08,0.11,0.11,0,7],[16.35,-33.08,0.11,0.11,0,5],[33.65,-33.08,0.11,0.11,0,5],[-48.7,-44,0.77,0.77,0.55,8.05],[-47.3,-44,0.77,0.77,0.55,8.05],[-49.2,-43.1,0.35,0.3,0.01,1.06],[47.3,-44,0.77,0.77,0.55,8.05],[48.7,-44,0.77,0.77,0.55,8.05],[46.8,-43.1,0.35,0.3,0.01,1.06],[-48.7,45,0.77,0.77,0.55,8.05],[-47.3,45,0.77,0.77,0.55,8.05],[-49.2,45.9,0.35,0.3,0.01,1.06],[47.3,45,0.77,0.77,0.55,8.05],[48.7,45,0.77,0.77,0.55,8.05],[46.8,45.9,0.35,0.3,0.01,1.06],[-0.7,-53,0.77,0.77,0.55,8.05],[0.7,-53,0.77,0.77,0.55,8.05],[-1.2,-52.1,0.35,0.3,0.01,1.06],[-34,12,0.9,0.5,0.24,0.92],[34,12,0.9,0.5,0.24,0.92],[-46,-27,0.9,0.5,0.24,0.92],[46,-27,0.9,0.5,0.24,0.92],[-14,38,0.9,0.5,0.24,0.92],[14,-39,0.9,0.5,0.24,0.92],[-34,5,0.56,0.45,0.07,0.89],[-33.87,5,0.67,0.45,0.97,1.79],[-35.3,6.1,0.11,0.11,0,0.72],[-32.7,6.1,0.11,0.11,0,0.72],[34,5,0.56,0.45,0.07,0.89],[34.13,5,0.67,0.45,0.97,1.79],[32.7,6.1,0.11,0.11,0,0.72],[35.3,6.1,0.11,0.11,0,0.72],[-34,34,0.56,0.45,0.07,0.89],[-33.87,34,0.67,0.45,0.97,1.79],[-35.3,35.1,0.11,0.11,0,0.72],[-32.7,35.1,0.11,0.11,0,0.72],[34,34,0.56,0.45,0.07,0.89],[34.13,34,0.67,0.45,0.97,1.79],[32.7,35.1,0.11,0.11,0,0.72],[35.3,35.1,0.11,0.11,0,0.72],[-50,1,0.56,0.45,0.07,0.89],[-49.87,1,0.67,0.45,0.97,1.79],[-51.3,2.1,0.11,0.11,0,0.72],[-48.7,2.1,0.11,0.11,0,0.72],[50,1,0.56,0.45,0.07,0.89],[50.13,1,0.67,0.45,0.97,1.79],[48.7,2.1,0.11,0.11,0,0.72],[51.3,2.1,0.11,0.11,0,0.72],[-50,-35,0.56,0.45,0.07,0.89],[-49.87,-35,0.67,0.45,0.97,1.79],[-51.3,-33.9,0.11,0.11,0,0.72],[-48.7,-33.9,0.11,0.11,0,0.72],[50,-35,0.56,0.45,0.07,0.89],[50.13,-35,0.67,0.45,0.97,1.79],[48.7,-33.9,0.11,0.11,0,0.72],[51.3,-33.9,0.11,0.11,0,0.72],[-8,39,0.56,0.45,0.07,0.89],[-7.87,39,0.67,0.45,0.97,1.79],[-9.3,40.1,0.11,0.11,0,0.72],[-6.7,40.1,0.11,0.11,0,0.72],[8,39,0.56,0.45,0.07,0.89],[8.13,39,0.67,0.45,0.97,1.79],[6.7,40.1,0.11,0.11,0,0.72],[9.3,40.1,0.11,0.11,0,0.72],[-54,22,0.6,0.4,0,0.88],[54,22,0.6,0.4,0,0.88],[-54,-9,0.6,0.4,0,0.88],[54,-9,0.6,0.4,0,0.88],[-28,42,0.6,0.4,0,0.88],[28,42,0.6,0.4,0,0.88],[-28,-46,0.6,0.4,0,0.88],[28,-46,0.6,0.4,0,0.88],[-30.56,17.69,0.49,0.28,0.14,0.96],[-29.44,17.69,0.49,0.28,0.14,0.96],[-30.56,18.31,0.49,0.28,0.14,0.9],[-29.44,18.31,0.49,0.28,0.14,0.9],[29.44,17.69,0.49,0.28,0.14,0.96],[30.56,17.69,0.49,0.28,0.14,0.96],[29.44,18.31,0.49,0.28,0.14,0.9],[30.56,18.31,0.49,0.28,0.14,0.9],[-30.56,-3.31,0.49,0.28,0.14,0.96],[-29.44,-3.31,0.49,0.28,0.14,0.96],[-30.56,-2.69,0.49,0.28,0.14,0.9],[-29.44,-2.69,0.49,0.28,0.14,0.9],[29.44,-3.31,0.49,0.28,0.14,0.96],[30.56,-3.31,0.49,0.28,0.14,0.96],[29.44,-2.69,0.49,0.28,0.14,0.9],[30.56,-2.69,0.49,0.28,0.14,0.9],[-30.56,-43.31,0.49,0.28,0.14,0.96],[-29.44,-43.31,0.49,0.28,0.14,0.96],[-30.56,-42.69,0.49,0.28,0.14,0.9],[-29.44,-42.69,0.49,0.28,0.14,0.9],[29.44,-43.31,0.49,0.28,0.14,0.96],[30.56,-43.31,0.49,0.28,0.14,0.96],[29.44,-42.69,0.49,0.28,0.14,0.9],[30.56,-42.69,0.49,0.28,0.14,0.9],[-47.56,7.69,0.49,0.28,0.14,0.96],[-46.44,7.69,0.49,0.28,0.14,0.96],[-47.56,8.31,0.49,0.28,0.14,0.9],[-46.44,8.31,0.49,0.28,0.14,0.9],[46.44,7.69,0.49,0.28,0.14,0.96],[47.56,7.69,0.49,0.28,0.14,0.96],[46.44,8.31,0.49,0.28,0.14,0.9],[47.56,8.31,0.49,0.28,0.14,0.9],[-43,1,2.5,0.33,0,0.92],[43,1,2.5,0.33,0,0.92],[-22,27,2,0.33,0,0.92],[22,27,2,0.33,0,0.92],[-22,-42,2,0.33,0,0.92],[22,-42,2,0.33,0,0.92]]};
+const SUPPORTED_MAPS=Object.freeze(Object.keys(MAP_COLLIDER_DATA));
 function mapSolids(map){
- const out=[];const add=(x,z,w,d,h,y=0)=>out.push(rect(x,z,w,d,h,y));
- if(map==='shipment'){
-  for(const [x,z,w,d] of [[0,-28,58,1],[0,28,58,1],[-28,0,1,58],[28,0,1,58]])add(x,z,w,d,3.6);
-  for(const [x,z,w,d] of [[-8,-18,12,3.6],[8,-18,12,3.6],[-19,-5,3.6,11],[19,5,3.6,11],[0,0,12,3.6],[-8,18,12,3.6],[8,18,12,3.6],[-19,16,3.6,6.5],[19,-16,3.6,6.5]])add(x,z,w,d,3.15);
-  for(const [x,z,w,d] of [[-8,-8,3.4,1.1],[8,8,3.4,1.1],[-8,8,3.4,1.1],[8,-8,3.4,1.1]])add(x,z,w,d,.95);
- } else if(map==='blacksite'){
-  for(const [x,z,w,d] of [[0,-61,126,2],[0,61,126,2],[-62,0,2,124],[62,0,2,124]])add(x,z,w,d,3.4);
-  for(const [x,z,w,d] of [[-20,-39,22,22],[20,-39,22,22],[0,-51,44,2],[-14,-27,12,2],[14,-27,12,2]])add(x,z,w,d,8);
-  for(const [x,z] of [[-27,37],[-27,29],[27,37],[27,29],[-40,13],[-40,5],[40,13],[40,5],[-25,-7],[-25,-15],[25,-7],[25,-15],[-40,-34],[40,-34],[-28,-49],[28,-49]])add(x,z,12,3.5,3.1);
-  for(const [x,z,w] of [[-12,24,7],[12,24,7],[-12,2,7],[12,2,7],[-13,-24,8],[13,-24,8],[-9,-47,6],[9,-47,6]])add(x,z,w,.75,1.05);
-  for(const [x,z] of [[-18,15],[18,15],[-18,-9],[18,-9],[-8,-34],[8,-34]])add(x,z,1.8,1.8,1.1);
-  for(const [x,z] of [[-47,25],[47,25],[-47,-17],[47,-17],[-16,-54],[16,-54]])add(x,z,2.3,2.1,1.7);
- } else if(map==='arctic'){
-  for(const [x,z,w,d] of [[0,-61,124,2],[0,61,124,2],[-61,0,2,124],[61,0,2,124]])add(x,z,w,d,3.5);
-  for(const [x,z,w,d,h] of [[-24,-35,18,2,7],[-33,-25,2,20,7],[-15,-25,2,20,7],[-29.75,-15,6.5,2,7],[-18.25,-15,6.5,2,7],[25,-34,18,2,5],[16,-25,2,18,5],[34,-25,2,18,5],[19.25,-16,6.5,2,5],[30.75,-16,6.5,2,5]])add(x,z,w,d,h);
-  for(const [x,z,w,d] of [[-43,17,9,3],[43,17,9,3],[-19,12,7,2],[19,12,7,2],[-42,-5,7,2],[42,-5,7,2],[0,-4,9,2]])add(x,z,w,d,1.3);
-  for(const [x,z] of [[-47,42],[47,42],[-45,-47],[45,-47],[-5,-48],[6,38]])add(x,z,2.2,2.1,1.7);
-  for(const [x,z,w,d] of [[-43,1,5,.65],[43,1,5,.65],[-22,27,4,.65],[22,27,4,.65],[-22,-42,4,.65],[22,-42,4,.65]])add(x,z,w,d,.92);
- }
- return out;
-}
-function chooseRespawnPosition(room, player) {
- const limit = room.map === 'shipment' ? 24.5 : 56;
- const solids = mapSolids(room.map);
- const occupied = [...room.players.values()].filter(other => other.id !== player.id && other.health > 0);
- const isBlocked = (x,z) => solids.some(c =>
-   x > c.x-c.hx-.85 && x < c.x+c.hx+.85 &&
-   z > c.z-c.hz-.85 && z < c.z+c.hz+.85 && c.maxY > 1
- );
- const valid = (x,z) => {
-   if (Math.abs(x) > limit || Math.abs(z) > limit || isBlocked(x,z)) return false;
-   const deathX = Number.isFinite(player.deadX) ? player.deadX : player.x;
-   const deathZ = Number.isFinite(player.deadZ) ? player.deadZ : player.z;
-   if (Math.hypot(x-deathX,z-deathZ) < Math.min(10, limit*.35)) return false;
-   if (occupied.some(other => Math.hypot(x-other.x,z-other.z) < 4.5)) return false;
-   if (room.mode === 'team-deathmatch' && player.team) {
-     const expected = player.team === 'red' ? -1 : 1;
-     if (Math.sign(x) !== expected) return false;
-   }
-   return true;
- };
- for (let i=0;i<240;i++) {
-   let x=(Math.random()*2-1)*limit, z=(Math.random()*2-1)*limit;
-   if (room.mode === 'team-deathmatch' && player.team) {
-     x=(player.team === 'red' ? -1 : 1)*(room.map === 'shipment' ? 12+Math.random()*10 : 28+Math.random()*24);
-     z=(Math.random()*2-1)*(room.map === 'shipment' ? 22 : 53);
-   }
-   if (valid(x,z)) return {x,z};
- }
- // Deterministic grid fallback still checks cover, distance from death, and other players.
- for (let radius=10; radius<=limit*2; radius+=2) {
-   for (const [x,z] of [[radius,0],[-radius,0],[0,radius],[0,-radius],[radius*.7,radius*.7],[-radius*.7,-radius*.7]]) {
-     if (valid(x,z)) return {x,z};
-   }
- }
- for(let x=-Math.floor(limit);x<=Math.floor(limit);x+=2) for(let z=-Math.floor(limit);z<=Math.floor(limit);z+=2) if(valid(x,z)) return {x,z};
- return {x:0,z:room.map === 'shipment' ? -22 : -48};
+  if(!Object.hasOwn(MAP_COLLIDER_DATA,map))return [];
+  return MAP_COLLIDER_DATA[map].map(([x,z,hx,hz,minY,maxY])=>({x,z,hx,hz,minY,maxY}));
 }
 // Ray vs 3D AABB using slabs. Ignore intersections beyond the target.
 const mapCache=new Map();
@@ -148,14 +98,31 @@ function playerShotCandidates(target,now,rewindMs){
 const PORT = process.env.PORT || 3001;
 const rooms = new Map();
 const serverStartedAt = Date.now();
+// Serve the web client locally if the full ZIP is present. On Render the same
+// server can still run with only server/ deployed and expose /health + WebSocket.
+const localClientDir=path.resolve(__dirname,'../client');
+const localFiles={'/':'index.html','/index.html':'index.html','/sw.js':'sw.js',
+  '/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg'};
+const contentTypes={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8',
+  '.svg':'image/svg+xml','.webmanifest':'application/manifest+json'};
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', 'application/json');
-  if (req.url === '/' || req.url === '/health') {
-    let playerCount = 0; for (const room of rooms.values()) playerCount += room.players.size;
-    return res.end(JSON.stringify({ ok: true, game: 'ZONE ZERO BLACKOUT', rooms: rooms.size, players: playerCount, uptimeSeconds: Math.floor((Date.now()-serverStartedAt)/1000) }));
+  const pathname=(req.url||'/').split('?')[0];
+  if(req.method==='GET'&&Object.hasOwn(localFiles,pathname)){
+    const file=path.join(localClientDir,localFiles[pathname]);
+    if(fs.existsSync(file)){
+      res.setHeader('Content-Type',contentTypes[path.extname(file)]||'application/octet-stream');
+      res.setHeader('Cache-Control','no-cache, no-store, must-revalidate');
+      fs.createReadStream(file).on('error',()=>res.destroy()).pipe(res);return;
+    }
   }
-  res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' }));
+  res.setHeader('Content-Type','application/json; charset=utf-8');
+  if(pathname==='/'||pathname==='/health'){
+    let playerCount=0;for(const room of rooms.values())playerCount+=room.players.size;
+    return res.end(JSON.stringify({ok:true,game:'ZONE ZERO',protocolVersion:PROTOCOL_VERSION,
+      rooms:rooms.size,players:playerCount,uptimeSeconds:Math.floor((Date.now()-serverStartedAt)/1000)}));
+  }
+  res.statusCode=404;res.end(JSON.stringify({error:'not found'}));
 });
 // Game messages are small; compression adds CPU and latency for little benefit.
 const wss = new WebSocketServer({ server, perMessageDeflate: false, maxPayload: 8192 });
@@ -176,8 +143,130 @@ function broadcast(room, msg, except) {
     ws.send(data);
   }
 }
-function publicPlayer(p) { const { ws, history, ...out } = p; return out; }
+function publicPlayer(p) { const { ws, history, respawnTimer, spawnLockedUntil, ...out } = p; return out; }
 function clamp(v, min, max, fallback = 0) { const n = Number(v); return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback; }
+// V46.9 - server-authoritative grounded spawn volumes. All points are validated
+// against the same generated map colliders used by the browser, not a partial
+// hand-maintained obstacle list. The eye of a standing player is 1.7m high.
+const PROTOCOL_VERSION=469;
+const RESPAWN_DELAY_MS=4000;
+const SPAWN_RADIUS=.78, PLAYER_HEIGHT=1.7, GROUND_Y=0;
+const spawnNavCache=new Map();
+function playerVolumeFree(map,x,eyeY,z,radius=SPAWN_RADIUS,height=PLAYER_HEIGHT){
+  const edge=map==='shipment'?25.5:57;
+  if(!SUPPORTED_MAPS.includes(map)||![x,eyeY,z].every(Number.isFinite) ||
+     Math.abs(x)>edge||Math.abs(z)>edge||eyeY-height<GROUND_Y-.08)return false;
+  let solids=mapCache.get(map);if(!solids){solids=mapSolids(map);mapCache.set(map,solids);}
+  const foot=eyeY-height;
+  for(const c of solids){
+    if(c.maxY<=foot+.055||c.minY>=eyeY-.08)continue;
+    const nx=Math.max(c.x-c.hx,Math.min(x,c.x+c.hx));
+    const nz=Math.max(c.z-c.hz,Math.min(z,c.z+c.hz));
+    if((x-nx)**2+(z-nz)**2<radius*radius-1e-7)return false;
+  }
+  return true;
+}
+function spawnIsFree(map,x,z){return playerVolumeFree(map,x,GROUND_Y+PLAYER_HEIGHT,z);}
+function spawnNav(map){
+  if(spawnNavCache.has(map))return spawnNavCache.get(map);
+  // Flat, continuous ground plane on the three current arenas. Do not assume
+  // that atop-a-container is a safe spawn; only the real floor is supported.
+  const edge=map==='shipment'?24:55,step=2;
+  const cells=new Map(),key=(x,z)=>x+','+z;
+  for(let x=-edge;x<=edge;x+=step)for(let z=-edge;z<=edge;z+=step){
+    if(spawnIsFree(map,x,z))cells.set(key(x,z),{x,z});
+  }
+  const visited=new Set();let largest=[];
+  for(const k of cells.keys()){
+    if(visited.has(k))continue;
+    const open=[k],component=[];visited.add(k);
+    for(let i=0;i<open.length;i++){const point=cells.get(open[i]);component.push(point);
+      for(const [dx,dz] of [[step,0],[-step,0],[0,step],[0,-step]]){
+        const nk=key(point.x+dx,point.z+dz);
+        if(cells.has(nk)&&!visited.has(nk)){visited.add(nk);open.push(nk);}
+      }
+    }
+    if(component.length>largest.length)largest=component;
+  }
+  // Restrict spawns to the largest walkable component, avoiding closed indoor
+  // pockets with no corridor/door that fits the standing capsule.
+  spawnNavCache.set(map,largest);return largest;
+}
+function chooseServerSpawn(r,p,priorPosition=null){
+  const nodes=spawnNav(r.map);if(!nodes.length)return null;
+  const foes=[...r.players.values()].filter(q=>q.id!==p.id&&q.health>0 &&
+    (r.mode!=='team-deathmatch'||q.team!==p.team));
+  if(r.mode==='coop')for(const e of r.enemies.values())if(!e.dead&&e.hp>0)foes.push(e);
+  const allies=r.mode==='team-deathmatch'?[...r.players.values()].filter(q=>q.id!==p.id&&q.health>0&&q.team===p.team):[];
+  let choices=nodes;
+  if(r.mode==='team-deathmatch'&&p.team){
+    const teamSide=p.team==='red'?-1:1;
+    const side=nodes.filter(q=>q.x*teamSide>2);if(side.length)choices=side;
+  }
+  let best=null,bestScore=-Infinity;
+  // All candidates are prevalidated against the full standing body volume.
+  // Scan with a rotating random start to avoid deterministic spawn camping.
+  const offset=Math.floor(Math.random()*choices.length);
+  const stride=Math.max(1,Math.floor(choices.length/220));
+  for(let i=0;i<choices.length;i+=stride){
+    const candidate=choices[(offset+i)%choices.length];
+    if(!spawnIsFree(r.map,candidate.x,candidate.z))continue;
+    let score=(Math.random()-.5)*4;
+    for(const foe of foes){
+      const dist=Math.hypot(candidate.x-foe.x,candidate.z-foe.z);
+      if(dist<2.6)score-=10000; // no overlapping a living player
+      else if(dist<8)score-=(8-dist)*32;
+      score+=Math.min(dist,48)*.35/Math.max(1,foes.length);
+      if(dist<32){const dx=candidate.x-foe.x,dz=candidate.z-foe.z;
+        const length=Math.hypot(dx,dz)||1;
+        if(!coverBefore(r.map,{x:foe.x,y:foe.y||1.7,z:foe.z},
+          {x:dx/length,y:0,z:dz/length},length))score-=26;
+      }
+    }
+    if(priorPosition){const dist=Math.hypot(candidate.x-priorPosition.x,candidate.z-priorPosition.z);
+      score+=Math.min(dist,30)*.3;if(dist<7)score-=65;
+    }
+    if(allies.length){const nearest=Math.min(...allies.map(q=>Math.hypot(candidate.x-q.x,candidate.z-q.z)));
+      if(nearest>=4&&nearest<20)score+=7;
+    }
+    if(score>bestScore){best=candidate;bestScore=score;}
+  }
+  return best?{x:best.x,y:GROUND_Y+PLAYER_HEIGHT,z:best.z}:null;
+}
+function performServerRespawn(r,p){
+  if(r.players.get(p.id)!==p||r.matchFinished||r.mode==='elimination'||p.health>0)return false;
+  const newPosition=chooseServerSpawn(r,p,{x:p.x,z:p.z});
+  if(!newPosition){
+    p.respawnAt=Date.now()+1000;
+    p.respawnTimer=setTimeout(()=>{p.respawnTimer=null;performServerRespawn(r,p);},1000);
+    p.respawnTimer.unref?.();
+    return false;
+  }
+  p.x=newPosition.x;p.y=newPosition.y;p.z=newPosition.z;
+  p.spawnLockedUntil=Date.now()+350;
+  p.health=p.maxHealth||100;
+  p.deadAt=0;p.respawnAt=0;
+  p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;p.crouching=false;
+  p.vx=0;p.vy=0;p.vz=0;p.yaw=0;p.pitch=0;
+  p.spawnVersion=(p.spawnVersion||1)+1;
+  p.history=[];rememberPlayerPosition(p);
+  p.ws.lastUpdate=0;
+  if(p.respawnTimer){clearTimeout(p.respawnTimer);p.respawnTimer=null;}
+  // A single authoritative snapshot restores health, coordinates and visibility.
+  broadcast(r,{type:'player-respawn',id:p.id,player:publicPlayer(p),position:{x:p.x,y:p.y,z:p.z},health:p.health,alive:true,spawnVersion:p.spawnVersion,protocolVersion:PROTOCOL_VERSION});
+  return true;
+}
+function markServerDeath(r,p,now=Date.now()){
+  if(p.deadAt)return;
+  p.health=0;p.deadAt=now;p.respawnAt=now+RESPAWN_DELAY_MS;
+  p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;
+  broadcast(r,{type:'player-death',id:p.id,health:0,alive:false,spawnVersion:p.spawnVersion,respawnAt:p.respawnAt});
+  if(r.mode!=='elimination'){
+    if(p.respawnTimer)clearTimeout(p.respawnTimer);
+    p.respawnTimer=setTimeout(()=>{p.respawnTimer=null;performServerRespawn(r,p);},RESPAWN_DELAY_MS);
+    p.respawnTimer.unref?.();
+  }
+}
 function sortedScores(r){const a=[...(r.scores?.values()||[])];if(r.mode==='team-deathmatch'){const totals={red:0,blue:0};for(const x of a)totals[x.team]=(totals[x.team]||0)+(x.kills||0);a.sort((x,y)=>(totals[y.team]||0)-(totals[x.team]||0)||(y.kills||0)-(x.kills||0)||(x.deaths||0)-(y.deaths||0));}else a.sort((x,y)=>(y.kills||0)-(x.kills||0)||(x.deaths||0)-(y.deaths||0));return a;}
 function teamCounts(r){const c={red:0,blue:0};for(const p of r.players.values())if(p.team in c)c[p.team]++;return c;}
 function startRound(r){if(r.matchTimer||r.matchEndsAt)return;r.roundStartsAt=Date.now()+5000;r.matchEndsAt=r.roundStartsAt+210000;for(const p of r.players.values())send(p.ws,{type:'match-tick',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});r.matchTimer=setTimeout(()=>{r.matchStarted=true;for(const p of r.players.values())send(p.ws,{type:'round-start',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});r.matchEndTimer=setTimeout(()=>{r.matchFinished=true;const scores=sortedScores(r);for(const p of r.players.values())send(p.ws,{type:'match-end',scores,mode:r.mode,teamScores:r.mode==='team-deathmatch'?{red:scores.filter(x=>x.team==='red').reduce((n,x)=>n+x.kills,0),blue:scores.filter(x=>x.team==='blue').reduce((n,x)=>n+x.kills,0)}:null});},210000);r.matchEndTimer.unref?.();},5000);r.matchTimer.unref?.();}
@@ -191,12 +280,15 @@ wss.on('connection', ws => {
     if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.type !== 'string') return;
     if (m.type === 'ping') { return send(ws, { type: 'pong', sentAt: Number(m.sentAt) || Date.now() }); }
     if (m.type === 'admin-auth') { const configured=String(process.env.ADMIN_CODE||''); const supplied=String(m.code||'').slice(0,32); ws.isAdmin=!!configured&&supplied===configured; return send(ws,{type:'admin-auth-result',ok:ws.isAdmin}); }
-    if (m.type === 'admin-disconnect-all') { if(!ws.isAdmin)return send(ws,{type:'admin-disconnect-result',ok:false}); const others=[...wss.clients].filter(client=>client!==ws&&client.readyState===WebSocket.OPEN); for(const client of others)send(client,{type:'server-reset',message:'Toutes les parties ont été arrêtées par l’administrateur. Retour au menu.'}); for(const r of rooms.values()){if(r.matchTimer)clearTimeout(r.matchTimer);if(r.matchEndTimer)clearTimeout(r.matchEndTimer);} rooms.clear(); for(const client of others){client.roomCode=null;} send(ws,{type:'admin-disconnect-result',ok:true}); setTimeout(()=>{for(const client of others){try{client.close(4001,'Admin reset');}catch(_){}}},900).unref?.(); return; }
+    if (m.type === 'admin-disconnect-all') { if(!ws.isAdmin)return send(ws,{type:'admin-disconnect-result',ok:false}); const others=[...wss.clients].filter(client=>client!==ws&&client.readyState===WebSocket.OPEN); for(const client of others)send(client,{type:'server-reset',message:'Toutes les parties ont été arrêtées par l’administrateur. Retour au menu.'}); for(const r of rooms.values()){if(r.matchTimer)clearTimeout(r.matchTimer);if(r.matchEndTimer)clearTimeout(r.matchEndTimer);for(const p of r.players.values())if(p.respawnTimer)clearTimeout(p.respawnTimer);} rooms.clear(); for(const client of others){client.roomCode=null;} send(ws,{type:'admin-disconnect-result',ok:true}); setTimeout(()=>{for(const client of others){try{client.close(4001,'Admin reset');}catch(_){}}},900).unref?.(); return; }
     if (m.type === 'join') {
+      if(ws.roomCode)return send(ws,{type:'error',message:'Déjà connecté à une salle.'});
       const code = String(m.room || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
       const name = String(m.name || 'Opérateur').replace(/[<>]/g, '').slice(0, 18) || 'Opérateur';
       if (!/^[A-Z0-9]{4,8}$/.test(code)) return send(ws, { type: 'error', message: 'Code de salle invalide.' });
       const requestedMap = String(m.map || 'blacksite').slice(0, 16);
+      if(!SUPPORTED_MAPS.includes(requestedMap))return send(ws,{type:'error',message:'Carte inconnue.'});
+      if(m.protocolVersion!==PROTOCOL_VERSION)return send(ws,{type:'version-mismatch',expected:PROTOCOL_VERSION,message:'Client obsolète : recharge ZONE ZERO pour jouer en ligne.'});
       const allowedModes = ['coop','deathmatch','team-deathmatch','elimination'];
       const requestedMode = allowedModes.includes(m.mode) ? m.mode : 'coop';
       const requestedTeam = m.team === 'blue' ? 'blue' : 'red';
@@ -208,25 +300,17 @@ wss.on('connection', ws => {
       if (r.players.size >= 32) return send(ws, { type: 'error', message: 'Salle complète (32 joueurs maximum).' });
       ws.roomCode = code; ws.playerName = name;
       const isHost = !r.hostId; if (isHost) r.hostId = ws.id;
-      let x,z;
-      if(requestedMap==='shipment'){
-        if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*22;z=(Math.random()-.5)*8;}
-        else {x=(Math.random()<.5?-1:1)*(20+Math.random()*2);z=(Math.random()<.5?-1:1)*(20+Math.random()*2);}
-      }else if(requestedMode==='team-deathmatch'){x=requestedTeam==='red'?-42:42;z=(Math.random()-.5)*70;}
-      else {const angle=Math.random()*Math.PI*2,dist=38+Math.random()*17;x=Math.cos(angle)*dist;z=Math.sin(angle)*dist;}
-      // Avoid spawning too close to another player whenever possible.
-      for(let i=0;i<24;i++){
-        if([...r.players.values()].every(q=>Math.hypot(q.x-x,q.z-z)>(requestedMap==='shipment'?7:18)))break;
-        if(requestedMap==='shipment'){
-          if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*22;z=(Math.random()-.5)*8;}
-          else {x=(Math.random()<.5?-1:1)*(20+Math.random()*2);z=(Math.random()<.5?-1:1)*(20+Math.random()*2);}
-        }else if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*(35+Math.random()*12);z=(Math.random()-.5)*90;}
-        else{const a=Math.random()*Math.PI*2,d=38+Math.random()*17;x=Math.cos(a)*d;z=Math.sin(a)*d;}
-      }
-      const p = { id: ws.id, name, ws, x, y:1.7, z, yaw:0, pitch:0, maxHealth:100, health:100, kills:0, deaths:0, moving:false, sprinting:false, aiming:false, firing:false, crouching:false, history:[], map:requestedMap, mode:requestedMode, team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
+      const spawn=chooseServerSpawn(r,{id:ws.id,team:requestedMode==='team-deathmatch'?requestedTeam:null});
+      if(!spawn)return send(ws,{type:'error',message:'Aucun point de spawn valide pour cette carte.'});
+      const p = { id: ws.id, name, ws, x:spawn.x, y:spawn.y, z:spawn.z,
+        yaw:0, pitch:0, maxHealth:100, health:100, kills:0, deaths:0,
+        spawnVersion:1, deadAt:0, respawnAt:0, spawnLockedUntil:Date.now()+350,
+        moving:false, sprinting:false, aiming:false, firing:false, crouching:false,
+        history:[], map:requestedMap, mode:requestedMode,
+        team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
       if (!r.scores) r.scores = new Map(); r.scores.set(p.id, { id:p.id, name:p.name, kills:0, deaths:0, team:p.team });
       rememberPlayerPosition(p);r.players.set(ws.id, p); startRound(r);
-      send(ws, { type:'joined', id:ws.id, room:code, isHost, mode:r.mode, team:p.team, spawn:{x:p.x,y:p.y,z:p.z}, matchEndsAt:r.matchEndsAt, roundStartsAt:r.roundStartsAt, scores:sortedScores(r), players:[...r.players.values()].filter(q=>q.id!==ws.id).map(publicPlayer), enemies:['deathmatch','team-deathmatch','elimination'].includes(r.mode)?[]:[...r.enemies.values()] });
+      send(ws, { type:'joined', protocolVersion:PROTOCOL_VERSION, id:ws.id, room:code, isHost, mode:r.mode, team:p.team, spawn:{x:p.x,y:p.y,z:p.z}, spawnVersion:p.spawnVersion, health:p.health, matchEndsAt:r.matchEndsAt, roundStartsAt:r.roundStartsAt, scores:sortedScores(r), players:[...r.players.values()].filter(q=>q.id!==ws.id).map(publicPlayer), enemies:['deathmatch','team-deathmatch','elimination'].includes(r.mode)?[]:[...r.enemies.values()] });
       broadcast(r, { type:'join', player:publicPlayer(p), scores:sortedScores(r), teamCounts:teamCounts(r) }, ws);
       broadcast(r, { type:'count', count:r.players.size }); broadcastTeamCounts(r);
       for(const player of r.players.values())send(player.ws,{type:'match-tick',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});
@@ -235,35 +319,33 @@ wss.on('connection', ws => {
     if (!ws.roomCode) return;
     const r = rooms.get(ws.roomCode); const p = r?.players.get(ws.id); if (!r || !p) return;
     if (m.type === 'state') {
-      if (r.mode !== 'coop' && p.health <= 0) return;
-      const now = Date.now(); if (!m.respawn && now - ws.lastUpdate < 50) return; ws.lastUpdate = now;
-      p.x = clamp(m.x, -100, 100); p.y = clamp(m.y, -5, 20, 1.7); p.z = clamp(m.z, -100, 100);
+      if (p.health <= 0 || m.spawnVersion !== p.spawnVersion) return;
+      const now = Date.now(); if (now - ws.lastUpdate < 50) return; ws.lastUpdate = now;
+      const nx=clamp(m.x,-100,100),ny=clamp(m.y,-5,20,1.7),nz=clamp(m.z,-100,100);
+      if(!playerVolumeFree(r.map,nx,ny,nz,.47,m.crouching?1.05:1.7))return;
+      if(now<(p.spawnLockedUntil||0)&&Math.hypot(nx-p.x,nz-p.z)>3)return;
+      p.x=nx;p.y=ny;p.z=nz;
       p.yaw = clamp(m.yaw, -20, 20); p.pitch = clamp(m.pitch, -1.6, 1.6);
       p.moving = !!m.moving; p.sprinting = !!m.sprinting; p.aiming = !!m.aiming; p.firing = !!m.firing;p.crouching=!!m.crouching;
       rememberPlayerPosition(p,now);
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
+    if (m.type === 'players-snapshot-request') {
+      send(ws,{type:'players-snapshot',protocolVersion:PROTOCOL_VERSION,players:[...r.players.values()].map(publicPlayer)});return;
+    }
     if (m.type === 'respawn-request') {
-      if (!['deathmatch','team-deathmatch'].includes(r.mode) || r.matchFinished ||
-          p.health > 0 || !p.deadAt || Date.now()-p.deadAt < 3900) return;
-      // Choose a fresh authoritative spawn away from the death location, cover, and other players.
-      const spawn = chooseRespawnPosition(r,p);
-      p.x=spawn.x;p.y=1.7;p.z=spawn.z;p.health=p.maxHealth||100;p.deadAt=0;p.deadX=undefined;p.deadZ=undefined;
-      p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;p.crouching=false;p.history=[];rememberPlayerPosition(p);
-      ws.lastUpdate=0;
-      // The player AND every observer receive exactly the same authoritative new alive state.
-      broadcast(r,{type:'player-respawn',player:publicPlayer(p)});
-      return;
+      // Backward compatibility only: clients never pick their spawn coordinates.
+      if(r.mode==='elimination'||!p.deadAt||Date.now()<p.respawnAt)return;
+      performServerRespawn(r,p);return;
     }
     if (m.type === 'player-health') {
-      // In competitive play the server owns health; only a real death allows a timed respawn.
-      if(r.mode!=='coop') {
-        if(p.health>0 || !p.deadAt || Date.now()-p.deadAt<3900 || r.mode==='elimination')return;
-        if(clamp(m.health,0,100)!==100)return;
-        p.deadAt=0;
-      }
-      p.health = clamp(m.health, 0, p.maxHealth || 100); if(p.health>0&&r.mode!=='coop')broadcast(r,{type:'player-respawn',player:publicPlayer(p)}); broadcast(r, { type: 'player-health', id: p.id, health: p.health }, ws);
-      broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
+      // PvP health / respawn is wholly server authoritative.
+      if(r.mode!=='coop'||p.deadAt||m.spawnVersion!==p.spawnVersion)return;
+      const newHealth=clamp(m.health,0,p.maxHealth||100);
+      p.health=newHealth;
+      if(newHealth<=0)markServerDeath(r,p);
+      broadcast(r,{type:'player-health',id:p.id,health:p.health,spawnVersion:p.spawnVersion},ws);
+      broadcast(r,{type:'state',player:publicPlayer(p)},ws);return;
     }
     if (m.type === 'score-request') { send(ws, { type:'scoreboard', scores:[...(r.scores?.values() || [])] }); return; }
     // Obsolete client-side damage reports are intentionally ignored.
@@ -298,11 +380,12 @@ wss.on('connection', ws => {
       const now=Date.now();if(now-(ws.lastEnemyPlayerHit||0)<650)return;ws.lastEnemyPlayerHit=now;
       const enemy=r.enemies.get(String(m.enemyId||''));if(!enemy||enemy.dead||Math.hypot(target.x-enemy.x,target.z-enemy.z)>4.5)return;
       const damage=clamp(m.damage,1,5,3);target.health=Math.max(0,target.health-damage);
-      if(target.health<=0){const score=r.scores.get(target.id);if(score)score.deaths++;send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:0,damage});broadcast(r,{type:'killfeed',killerName:'HOSTILE',victimName:target.name||'Opérateur',weapon:'BOT'});broadcast(r,{type:'scoreboard',scores:sortedScores(r)});}
-      else send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:target.health,damage});
+      if(target.health<=0){markServerDeath(r,target,now);const score=r.scores.get(target.id);if(score)score.deaths++;send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:0,damage,spawnVersion:target.spawnVersion});broadcast(r,{type:'killfeed',killerName:'HOSTILE',victimName:target.name||'Opérateur',weapon:'BOT'});broadcast(r,{type:'scoreboard',scores:sortedScores(r)});}
+      else send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:target.health,damage,spawnVersion:target.spawnVersion});
       broadcast(r,{type:'state',player:publicPlayer(target)});return;
     }
     if (m.type === 'shot') {
+      if(p.health<=0||m.spawnVersion!==p.spawnVersion)return;
       if(Date.now()<(r.roundStartsAt||0)||r.matchFinished)return;
       const now = Date.now();
       // Normalize shot direction outside the rate-limit branch so tracer broadcast never throws.
@@ -336,15 +419,14 @@ wss.on('connection', ws => {
             const damage = headshot ? bodyDamage * 2 : bodyDamage;
             best.health = Math.max(0, best.health - damage);
             if (best.health <= 0) {
-              best.deadAt=now;best.deadX=best.x;best.deadZ=best.z;
+              markServerDeath(r,best,now);
               const killerScore = r.scores.get(p.id), victimScore = r.scores.get(best.id);
               if (killerScore) killerScore.kills++;
               if (victimScore) victimScore.deaths++;
-              send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: 0, damage });
-              send(best.ws, { type: 'player-killed', target: best.id, attacker: p.id, attackerName: p.name || 'Opérateur' }); broadcast(r,{type:'killfeed',killerName:p.name||'Opérateur',victimName:best.name||'Opérateur',weapon:weapon.toUpperCase(),team:p.team||null});
-            } else send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: best.health, damage });
+              send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: 0, damage, spawnVersion:best.spawnVersion });
+              send(best.ws, { type: 'player-killed', target: best.id, attacker: p.id, attackerName: p.name || 'Opérateur', spawnVersion:best.spawnVersion }); broadcast(r,{type:'killfeed',killerName:p.name||'Opérateur',victimName:best.name||'Opérateur',weapon:weapon.toUpperCase(),team:p.team||null});
+            } else send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: best.health, damage, spawnVersion:best.spawnVersion });
             broadcast(r, { type: 'state', player: publicPlayer(best) });
-            broadcast(r, { type: 'player-health', id: best.id, health: best.health }, best.ws);
             broadcast(r, { type: 'player-hit-confirmed', attacker: p.id, target: best.id, health: best.health, damage, headshot, weapon });
             broadcast(r, { type: 'scoreboard', scores: [...r.scores.values()] });
           }
@@ -358,6 +440,7 @@ wss.on('connection', ws => {
   ws.on('error', err => console.warn('[ZONE ZERO] Socket error:', err.message));
   ws.on('close', () => {
     if (!ws.roomCode) return; const r = rooms.get(ws.roomCode); if (!r) return;
+    const player=r.players.get(ws.id);if(player?.respawnTimer)clearTimeout(player.respawnTimer);
     r.players.delete(ws.id); r.scores?.delete(ws.id); broadcast(r, { type: 'leave', id: ws.id }); broadcast(r, { type: 'count', count: r.players.size }); broadcast(r, {type:'scoreboard',scores:sortedScores(r)}); broadcastTeamCounts(r);
     if (r.hostId === ws.id) {
       r.hostId = r.players.keys().next().value || null;
@@ -371,5 +454,6 @@ server.on('error', err => {
   console.error('[ZONE ZERO] Impossible de démarrer le serveur :', err);
   process.exitCode = 1;
 });
+const snapshots=setInterval(()=>{for(const r of rooms.values())broadcast(r,{type:'players-snapshot',protocolVersion:PROTOCOL_VERSION,players:[...r.players.values()].map(publicPlayer)});},3500);snapshots.unref?.();
 const heartbeat=setInterval(()=>{for(const ws of wss.clients){if(ws.isAlive===false){ws.terminate();continue;}ws.isAlive=false;ws.lastWsPingAt=Date.now();ws.ping();}},25000);heartbeat.unref?.();
 server.listen(PORT, '0.0.0.0', () => console.log('ZONE ZERO server ready on 0.0.0.0:' + PORT));
