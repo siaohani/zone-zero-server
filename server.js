@@ -139,8 +139,108 @@ function broadcast(room, msg, except) {
     ws.send(data);
   }
 }
-function publicPlayer(p) { const { ws, history, ...out } = p; return out; }
+function publicPlayer(p) { const { ws, history, respawnTimer, ...out } = p; return out; }
 function clamp(v, min, max, fallback = 0) { const n = Number(v); return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback; }
+// V46.8 — Spawn controlled exclusively by the server, for all network modes.
+const RESPAWN_DELAY_MS=4000;
+const SPAWN_RADIUS=.75;
+function spawnIsFree(map,x,z){
+  const edge=map==='shipment'?25.5:57;
+  if(!Number.isFinite(x)||!Number.isFinite(z)||Math.abs(x)>edge||Math.abs(z)>edge)return false;
+  // Match the player radius on the client and give cover geometry a safety margin.
+  let solids=mapCache.get(map);
+  if(!solids){solids=mapSolids(map);mapCache.set(map,solids);}
+  return !solids.some(c=>c.maxY>.35 && c.minY<1.7 &&
+    x>c.x-c.hx-SPAWN_RADIUS&&x<c.x+c.hx+SPAWN_RADIUS &&
+    z>c.z-c.hz-SPAWN_RADIUS&&z<c.z+c.hz+SPAWN_RADIUS);
+}
+function spawnWaypoints(map){
+  if(map==='shipment')return [
+    [-22,-22],[22,-22],[-22,22],[22,22],[-22,0],[22,0],[0,-22],[0,22],
+    [-12,-12],[12,-12],[-12,12],[12,12],[-23,-10],[23,10]];
+  return [
+    [-50,48],[50,48],[-50,-48],[50,-48],[-52,0],[52,0],[0,52],[0,-52],
+    [-37,48],[37,48],[-48,32],[48,32],[-48,-33],[48,-33],
+    [-27,48],[27,48],[-35,-8],[35,-8],[-38,28],[38,28],[0,39],[0,-8]
+  ];
+}
+function chooseServerSpawn(r,p,priorPosition=null){
+  const edge=r.map==='shipment'?24.5:56;
+  const foes=[...r.players.values()].filter(q=>q.id!==p.id&&q.health>0 &&
+    (r.mode!=='team-deathmatch'||q.team!==p.team));
+  if(r.mode==='coop')for(const e of r.enemies.values())if(!e.dead&&e.hp>0)
+    foes.push({x:e.x,z:e.z,y:1.7});
+  const allies=r.mode==='team-deathmatch'?[...r.players.values()].filter(q=>q.id!==p.id&&q.team===p.team&&q.health>0):[];
+  const points=spawnWaypoints(r.map).map(([x,z])=>({x,z}));
+  // Broad seeded candidates prevent repeated respawning at a single waypoint.
+  for(let i=0;i<170;i++){
+    let x=(Math.random()*2-1)*edge,z=(Math.random()*2-1)*edge;
+    if(r.mode==='team-deathmatch')x=(p.team==='red'?-1:1)*(6+Math.random()*(edge-7));
+    points.push({x,z});
+  }
+  const candidates=[];
+  for(const candidate of points){
+    const {x,z}=candidate;
+    if(!spawnIsFree(r.map,x,z))continue;
+    if(r.mode==='team-deathmatch' && Math.sign(x)!==(p.team==='red'?-1:1))continue;
+    let score=0;
+    if(foes.length){
+      let nearest=Infinity, visible=0;
+      for(const enemy of foes){
+        const dist=Math.hypot(x-enemy.x,z-enemy.z);nearest=Math.min(nearest,dist);
+        if(dist<34){const len=Math.hypot(x-enemy.x,z-enemy.z)||1;
+          if(!coverBefore(r.map,{x:enemy.x,y:enemy.y||1.7,z:enemy.z},
+             {x:(x-enemy.x)/len,y:0,z:(z-enemy.z)/len},len))visible++;
+        }
+      }
+      // Prioritize safety more than random spread: far from foes and behind cover.
+      score+=Math.min(nearest,44)*2.8 -visible*32;
+      if(nearest<7)score-=200;
+    }
+    if(priorPosition){const d=Math.hypot(x-priorPosition.x,z-priorPosition.z);
+      score+=Math.min(d,30)*.6;if(d<9)score-=110;
+    }
+    if(allies.length){const nearest=Math.min(...allies.map(q=>Math.hypot(x-q.x,z-q.z)));
+      if(nearest>=5&&nearest<24)score+=10;
+    }
+    score+=(Math.random()-.5)*7;
+    candidates.push({x,z,score});
+  }
+  candidates.sort((a,b)=>b.score-a.score);
+  const best=candidates.length?candidates[Math.floor(Math.random()*Math.min(4,candidates.length))]:null;
+  // The fixed waypoints are open; never fall back to the position where the player died.
+  if(best)return {x:best.x,y:1.7,z:best.z};
+  for(let x=-edge;x<=edge;x+=2)for(let z=-edge;z<=edge;z+=2)
+    if(spawnIsFree(r.map,x,z))return {x,y:1.7,z};
+  return {x:0,y:1.7,z:0};
+}
+function performServerRespawn(r,p){
+  if(r.players.get(p.id)!==p||r.matchFinished||r.mode==='elimination'||p.health>0)return false;
+  const newPosition=chooseServerSpawn(r,p,{x:p.x,z:p.z});
+  p.x=newPosition.x;p.y=newPosition.y;p.z=newPosition.z;
+  p.health=p.maxHealth||100;
+  p.deadAt=0;p.respawnAt=0;
+  p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;p.crouching=false;
+  p.vx=0;p.vy=0;p.vz=0;p.yaw=0;p.pitch=0;
+  p.spawnVersion=(p.spawnVersion||1)+1;
+  p.history=[];rememberPlayerPosition(p);
+  p.ws.lastUpdate=0;
+  if(p.respawnTimer){clearTimeout(p.respawnTimer);p.respawnTimer=null;}
+  // A single authoritative snapshot restores health, coordinates and visibility.
+  broadcast(r,{type:'player-respawn',player:publicPlayer(p),spawnVersion:p.spawnVersion});
+  return true;
+}
+function markServerDeath(r,p,now=Date.now()){
+  if(p.deadAt)return;
+  p.health=0;p.deadAt=now;p.respawnAt=now+RESPAWN_DELAY_MS;
+  p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;
+  broadcast(r,{type:'player-death',id:p.id,health:0,spawnVersion:p.spawnVersion,respawnAt:p.respawnAt});
+  if(r.mode!=='elimination'){
+    if(p.respawnTimer)clearTimeout(p.respawnTimer);
+    p.respawnTimer=setTimeout(()=>{p.respawnTimer=null;performServerRespawn(r,p);},RESPAWN_DELAY_MS);
+    p.respawnTimer.unref?.();
+  }
+}
 function sortedScores(r){const a=[...(r.scores?.values()||[])];if(r.mode==='team-deathmatch'){const totals={red:0,blue:0};for(const x of a)totals[x.team]=(totals[x.team]||0)+(x.kills||0);a.sort((x,y)=>(totals[y.team]||0)-(totals[x.team]||0)||(y.kills||0)-(x.kills||0)||(x.deaths||0)-(y.deaths||0));}else a.sort((x,y)=>(y.kills||0)-(x.kills||0)||(x.deaths||0)-(y.deaths||0));return a;}
 function teamCounts(r){const c={red:0,blue:0};for(const p of r.players.values())if(p.team in c)c[p.team]++;return c;}
 function startRound(r){if(r.matchTimer||r.matchEndsAt)return;r.roundStartsAt=Date.now()+5000;r.matchEndsAt=r.roundStartsAt+210000;for(const p of r.players.values())send(p.ws,{type:'match-tick',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});r.matchTimer=setTimeout(()=>{r.matchStarted=true;for(const p of r.players.values())send(p.ws,{type:'round-start',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});r.matchEndTimer=setTimeout(()=>{r.matchFinished=true;const scores=sortedScores(r);for(const p of r.players.values())send(p.ws,{type:'match-end',scores,mode:r.mode,teamScores:r.mode==='team-deathmatch'?{red:scores.filter(x=>x.team==='red').reduce((n,x)=>n+x.kills,0),blue:scores.filter(x=>x.team==='blue').reduce((n,x)=>n+x.kills,0)}:null});},210000);r.matchEndTimer.unref?.();},5000);r.matchTimer.unref?.();}
@@ -154,7 +254,7 @@ wss.on('connection', ws => {
     if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.type !== 'string') return;
     if (m.type === 'ping') { return send(ws, { type: 'pong', sentAt: Number(m.sentAt) || Date.now() }); }
     if (m.type === 'admin-auth') { const configured=String(process.env.ADMIN_CODE||''); const supplied=String(m.code||'').slice(0,32); ws.isAdmin=!!configured&&supplied===configured; return send(ws,{type:'admin-auth-result',ok:ws.isAdmin}); }
-    if (m.type === 'admin-disconnect-all') { if(!ws.isAdmin)return send(ws,{type:'admin-disconnect-result',ok:false}); const others=[...wss.clients].filter(client=>client!==ws&&client.readyState===WebSocket.OPEN); for(const client of others)send(client,{type:'server-reset',message:'Toutes les parties ont été arrêtées par l’administrateur. Retour au menu.'}); for(const r of rooms.values()){if(r.matchTimer)clearTimeout(r.matchTimer);if(r.matchEndTimer)clearTimeout(r.matchEndTimer);} rooms.clear(); for(const client of others){client.roomCode=null;} send(ws,{type:'admin-disconnect-result',ok:true}); setTimeout(()=>{for(const client of others){try{client.close(4001,'Admin reset');}catch(_){}}},900).unref?.(); return; }
+    if (m.type === 'admin-disconnect-all') { if(!ws.isAdmin)return send(ws,{type:'admin-disconnect-result',ok:false}); const others=[...wss.clients].filter(client=>client!==ws&&client.readyState===WebSocket.OPEN); for(const client of others)send(client,{type:'server-reset',message:'Toutes les parties ont été arrêtées par l’administrateur. Retour au menu.'}); for(const r of rooms.values()){if(r.matchTimer)clearTimeout(r.matchTimer);if(r.matchEndTimer)clearTimeout(r.matchEndTimer);for(const p of r.players.values())if(p.respawnTimer)clearTimeout(p.respawnTimer);} rooms.clear(); for(const client of others){client.roomCode=null;} send(ws,{type:'admin-disconnect-result',ok:true}); setTimeout(()=>{for(const client of others){try{client.close(4001,'Admin reset');}catch(_){}}},900).unref?.(); return; }
     if (m.type === 'join') {
       const code = String(m.room || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
       const name = String(m.name || 'Opérateur').replace(/[<>]/g, '').slice(0, 18) || 'Opérateur';
@@ -171,25 +271,16 @@ wss.on('connection', ws => {
       if (r.players.size >= 32) return send(ws, { type: 'error', message: 'Salle complète (32 joueurs maximum).' });
       ws.roomCode = code; ws.playerName = name;
       const isHost = !r.hostId; if (isHost) r.hostId = ws.id;
-      let x,z;
-      if(requestedMap==='shipment'){
-        if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*22;z=(Math.random()-.5)*8;}
-        else {x=(Math.random()<.5?-1:1)*(20+Math.random()*2);z=(Math.random()<.5?-1:1)*(20+Math.random()*2);}
-      }else if(requestedMode==='team-deathmatch'){x=requestedTeam==='red'?-42:42;z=(Math.random()-.5)*70;}
-      else {const angle=Math.random()*Math.PI*2,dist=38+Math.random()*17;x=Math.cos(angle)*dist;z=Math.sin(angle)*dist;}
-      // Avoid spawning too close to another player whenever possible.
-      for(let i=0;i<24;i++){
-        if([...r.players.values()].every(q=>Math.hypot(q.x-x,q.z-z)>(requestedMap==='shipment'?7:18)))break;
-        if(requestedMap==='shipment'){
-          if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*22;z=(Math.random()-.5)*8;}
-          else {x=(Math.random()<.5?-1:1)*(20+Math.random()*2);z=(Math.random()<.5?-1:1)*(20+Math.random()*2);}
-        }else if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*(35+Math.random()*12);z=(Math.random()-.5)*90;}
-        else{const a=Math.random()*Math.PI*2,d=38+Math.random()*17;x=Math.cos(a)*d;z=Math.sin(a)*d;}
-      }
-      const p = { id: ws.id, name, ws, x, y:1.7, z, yaw:0, pitch:0, maxHealth:100, health:100, kills:0, deaths:0, moving:false, sprinting:false, aiming:false, firing:false, crouching:false, history:[], map:requestedMap, mode:requestedMode, team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
+      const spawn=chooseServerSpawn(r,{id:ws.id,team:requestedMode==='team-deathmatch'?requestedTeam:null});
+      const p = { id: ws.id, name, ws, x:spawn.x, y:spawn.y, z:spawn.z,
+        yaw:0, pitch:0, maxHealth:100, health:100, kills:0, deaths:0,
+        spawnVersion:1, deadAt:0, respawnAt:0,
+        moving:false, sprinting:false, aiming:false, firing:false, crouching:false,
+        history:[], map:requestedMap, mode:requestedMode,
+        team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
       if (!r.scores) r.scores = new Map(); r.scores.set(p.id, { id:p.id, name:p.name, kills:0, deaths:0, team:p.team });
       rememberPlayerPosition(p);r.players.set(ws.id, p); startRound(r);
-      send(ws, { type:'joined', id:ws.id, room:code, isHost, mode:r.mode, team:p.team, spawn:{x:p.x,y:p.y,z:p.z}, matchEndsAt:r.matchEndsAt, roundStartsAt:r.roundStartsAt, scores:sortedScores(r), players:[...r.players.values()].filter(q=>q.id!==ws.id).map(publicPlayer), enemies:['deathmatch','team-deathmatch','elimination'].includes(r.mode)?[]:[...r.enemies.values()] });
+      send(ws, { type:'joined', id:ws.id, room:code, isHost, mode:r.mode, team:p.team, spawn:{x:p.x,y:p.y,z:p.z}, spawnVersion:p.spawnVersion, health:p.health, matchEndsAt:r.matchEndsAt, roundStartsAt:r.roundStartsAt, scores:sortedScores(r), players:[...r.players.values()].filter(q=>q.id!==ws.id).map(publicPlayer), enemies:['deathmatch','team-deathmatch','elimination'].includes(r.mode)?[]:[...r.enemies.values()] });
       broadcast(r, { type:'join', player:publicPlayer(p), scores:sortedScores(r), teamCounts:teamCounts(r) }, ws);
       broadcast(r, { type:'count', count:r.players.size }); broadcastTeamCounts(r);
       for(const player of r.players.values())send(player.ws,{type:'match-tick',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});
@@ -198,7 +289,7 @@ wss.on('connection', ws => {
     if (!ws.roomCode) return;
     const r = rooms.get(ws.roomCode); const p = r?.players.get(ws.id); if (!r || !p) return;
     if (m.type === 'state') {
-      if (r.mode !== 'coop' && p.health <= 0) return;
+      if (p.health <= 0 || m.spawnVersion !== p.spawnVersion) return;
       const now = Date.now(); if (now - ws.lastUpdate < 50) return; ws.lastUpdate = now;
       p.x = clamp(m.x, -100, 100); p.y = clamp(m.y, -5, 20, 1.7); p.z = clamp(m.z, -100, 100);
       p.yaw = clamp(m.yaw, -20, 20); p.pitch = clamp(m.pitch, -1.6, 1.6);
@@ -207,30 +298,18 @@ wss.on('connection', ws => {
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
     if (m.type === 'respawn-request') {
-      if (!['deathmatch','team-deathmatch'].includes(r.mode) || r.matchFinished ||
-          p.health > 0 || !p.deadAt || Date.now()-p.deadAt < 3900) return;
-      const limit = r.map === 'shipment' ? 26.5 : 58.5;
-      const x = clamp(m.x,-limit,limit,p.x), z = clamp(m.z,-limit,limit,p.z);
-      // Reject respawns inside major cover objects; the client already chooses a safe position.
-      const obstructed = mapSolids(r.map).some(c => x > c.x-c.hx-.65 && x < c.x+c.hx+.65 &&
-                                                      z > c.z-c.hz-.65 && z < c.z+c.hz+.65 && c.maxY>1);
-      if (obstructed) return send(ws,{type:'respawn-rejected',reason:'position'});
-      p.x=x;p.y=1.7;p.z=z;p.health=p.maxHealth||100;p.deadAt=0;
-      p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;p.crouching=false;p.history=[];rememberPlayerPosition(p);
-      ws.lastUpdate=0;
-      // The player AND every observer receive exactly the same authoritative new alive state.
-      broadcast(r,{type:'player-respawn',player:publicPlayer(p)});
-      return;
+      // Backward compatibility only: clients never pick their spawn coordinates.
+      if(r.mode==='elimination'||!p.deadAt||Date.now()<p.respawnAt)return;
+      performServerRespawn(r,p);return;
     }
     if (m.type === 'player-health') {
-      // In competitive play the server owns health; only a real death allows a timed respawn.
-      if(r.mode!=='coop') {
-        if(p.health>0 || !p.deadAt || Date.now()-p.deadAt<3900 || r.mode==='elimination')return;
-        if(clamp(m.health,0,100)!==100)return;
-        p.deadAt=0;
-      }
-      p.health = clamp(m.health, 0, p.maxHealth || 100); if(p.health>0&&r.mode!=='coop')broadcast(r,{type:'player-respawn',player:publicPlayer(p)}); broadcast(r, { type: 'player-health', id: p.id, health: p.health }, ws);
-      broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
+      // PvP health / respawn is wholly server authoritative.
+      if(r.mode!=='coop'||p.deadAt)return;
+      const newHealth=clamp(m.health,0,p.maxHealth||100);
+      p.health=newHealth;
+      if(newHealth<=0)markServerDeath(r,p);
+      broadcast(r,{type:'player-health',id:p.id,health:p.health},ws);
+      broadcast(r,{type:'state',player:publicPlayer(p)},ws);return;
     }
     if (m.type === 'score-request') { send(ws, { type:'scoreboard', scores:[...(r.scores?.values() || [])] }); return; }
     // Obsolete client-side damage reports are intentionally ignored.
@@ -265,11 +344,12 @@ wss.on('connection', ws => {
       const now=Date.now();if(now-(ws.lastEnemyPlayerHit||0)<650)return;ws.lastEnemyPlayerHit=now;
       const enemy=r.enemies.get(String(m.enemyId||''));if(!enemy||enemy.dead||Math.hypot(target.x-enemy.x,target.z-enemy.z)>4.5)return;
       const damage=clamp(m.damage,1,5,3);target.health=Math.max(0,target.health-damage);
-      if(target.health<=0){const score=r.scores.get(target.id);if(score)score.deaths++;send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:0,damage});broadcast(r,{type:'killfeed',killerName:'HOSTILE',victimName:target.name||'Opérateur',weapon:'BOT'});broadcast(r,{type:'scoreboard',scores:sortedScores(r)});}
+      if(target.health<=0){markServerDeath(r,target,now);const score=r.scores.get(target.id);if(score)score.deaths++;send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:0,damage});broadcast(r,{type:'killfeed',killerName:'HOSTILE',victimName:target.name||'Opérateur',weapon:'BOT'});broadcast(r,{type:'scoreboard',scores:sortedScores(r)});}
       else send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:target.health,damage});
       broadcast(r,{type:'state',player:publicPlayer(target)});return;
     }
     if (m.type === 'shot') {
+      if(p.health<=0||m.spawnVersion!==p.spawnVersion)return;
       if(Date.now()<(r.roundStartsAt||0)||r.matchFinished)return;
       const now = Date.now();
       // Normalize shot direction outside the rate-limit branch so tracer broadcast never throws.
@@ -303,7 +383,7 @@ wss.on('connection', ws => {
             const damage = headshot ? bodyDamage * 2 : bodyDamage;
             best.health = Math.max(0, best.health - damage);
             if (best.health <= 0) {
-              best.deadAt=now;
+              markServerDeath(r,best,now);
               const killerScore = r.scores.get(p.id), victimScore = r.scores.get(best.id);
               if (killerScore) killerScore.kills++;
               if (victimScore) victimScore.deaths++;
@@ -324,6 +404,7 @@ wss.on('connection', ws => {
   ws.on('error', err => console.warn('[ZONE ZERO] Socket error:', err.message));
   ws.on('close', () => {
     if (!ws.roomCode) return; const r = rooms.get(ws.roomCode); if (!r) return;
+    const player=r.players.get(ws.id);if(player?.respawnTimer)clearTimeout(player.respawnTimer);
     r.players.delete(ws.id); r.scores?.delete(ws.id); broadcast(r, { type: 'leave', id: ws.id }); broadcast(r, { type: 'count', count: r.players.size }); broadcast(r, {type:'scoreboard',scores:sortedScores(r)}); broadcastTeamCounts(r);
     if (r.hostId === ws.id) {
       r.hostId = r.players.keys().next().value || null;
