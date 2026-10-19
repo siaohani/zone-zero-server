@@ -39,7 +39,9 @@ function chooseRespawnPosition(room, player) {
  );
  const valid = (x,z) => {
    if (Math.abs(x) > limit || Math.abs(z) > limit || isBlocked(x,z)) return false;
-   if (Math.hypot(x-player.x,z-player.z) < Math.min(8, limit*.35)) return false;
+   const deathX = Number.isFinite(player.deadX) ? player.deadX : player.x;
+   const deathZ = Number.isFinite(player.deadZ) ? player.deadZ : player.z;
+   if (Math.hypot(x-deathX,z-deathZ) < Math.min(10, limit*.35)) return false;
    if (occupied.some(other => Math.hypot(x-other.x,z-other.z) < 4.5)) return false;
    if (room.mode === 'team-deathmatch' && player.team) {
      const expected = player.team === 'red' ? -1 : 1;
@@ -246,7 +248,7 @@ wss.on('connection', ws => {
           p.health > 0 || !p.deadAt || Date.now()-p.deadAt < 3900) return;
       // Choose a fresh authoritative spawn away from the death location, cover, and other players.
       const spawn = chooseRespawnPosition(r,p);
-      p.x=spawn.x;p.y=1.7;p.z=spawn.z;p.health=p.maxHealth||100;p.deadAt=0;
+      p.x=spawn.x;p.y=1.7;p.z=spawn.z;p.health=p.maxHealth||100;p.deadAt=0;p.deadX=undefined;p.deadZ=undefined;
       p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;p.crouching=false;p.history=[];rememberPlayerPosition(p);
       ws.lastUpdate=0;
       // The player AND every observer receive exactly the same authoritative new alive state.
@@ -334,7 +336,7 @@ wss.on('connection', ws => {
             const damage = headshot ? bodyDamage * 2 : bodyDamage;
             best.health = Math.max(0, best.health - damage);
             if (best.health <= 0) {
-              best.deadAt=now;
+              best.deadAt=now;best.deadX=best.x;best.deadZ=best.z;
               const killerScore = r.scores.get(p.id), victimScore = r.scores.get(best.id);
               if (killerScore) killerScore.kills++;
               if (victimScore) victimScore.deaths++;
@@ -342,6 +344,7 @@ wss.on('connection', ws => {
               send(best.ws, { type: 'player-killed', target: best.id, attacker: p.id, attackerName: p.name || 'Opérateur' }); broadcast(r,{type:'killfeed',killerName:p.name||'Opérateur',victimName:best.name||'Opérateur',weapon:weapon.toUpperCase(),team:p.team||null});
             } else send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: best.health, damage });
             broadcast(r, { type: 'state', player: publicPlayer(best) });
+            broadcast(r, { type: 'player-health', id: best.id, health: best.health }, best.ws);
             broadcast(r, { type: 'player-hit-confirmed', attacker: p.id, target: best.id, health: best.health, damage, headshot, weapon });
             broadcast(r, { type: 'scoreboard', scores: [...r.scores.values()] });
           }
