@@ -46,6 +46,68 @@ function coverBefore(map,origin,dir,distance){
  return false;
 }
 
+// V46.7: targeted, bounded lag compensation for moving players. No client-supplied
+// "hit" or timing is trusted. All impact and cover decisions remain server-side.
+const PLAYER_HISTORY_MS=270;
+function rememberPlayerPosition(p,now=Date.now()) {
+  if (!p.history) p.history=[];
+  p.history.push({x:p.x,y:p.y,z:p.z,crouching:!!p.crouching,at:now});
+  while (p.history.length>1 && p.history[0].at<now-PLAYER_HISTORY_MS) p.history.shift();
+  if(p.history.length>9)p.history.splice(0,p.history.length-9);
+}
+function raySphereT(o,d,cx,cy,cz,r,maxT) {
+  const x=o.x-cx,y=o.y-cy,z=o.z-cz;
+  const b=x*d.x+y*d.y+z*d.z;
+  const c=x*x+y*y+z*z-r*r;
+  const det=b*b-c;if(det<0)return Infinity;
+  const root=Math.sqrt(det),t=-b-root;
+  const t2=t>=0?t:-b+root;
+  return t2>=0&&t2<=maxT?t2:Infinity;
+}
+// Torso + limbs, modeled as a vertical finite cylinder. For a near-vertical
+// shot, test its caps too (otherwise shooting down at a player misses).
+function rayCylinderT(o,d,cx,cz,minY,maxY,r,maxT) {
+  const rx=o.x-cx,rz=o.z-cz,a=d.x*d.x+d.z*d.z;
+  let best=Infinity;
+  if(a>1e-9){
+    const b=rx*d.x+rz*d.z,c=rx*rx+rz*rz-r*r,disc=b*b-a*c;
+    if(disc>=0){const root=Math.sqrt(disc);
+      for(const t of [(-b-root)/a,(-b+root)/a]){
+        if(t>=0&&t<best&&t<=maxT){const y=o.y+t*d.y;if(y>=minY&&y<=maxY)best=t;}
+      }
+    }
+  }
+  if(Math.abs(d.y)>1e-9)for(const y of [minY,maxY]){
+    const t=(y-o.y)/d.y;
+    if(t>=0&&t<best&&t<=maxT){const x=rx+d.x*t,z=rz+d.z*t;if(x*x+z*z<=r*r)best=t;}
+  }
+  // Firing from inside the hitbox must also register.
+  if(o.y>=minY&&o.y<=maxY&&rx*rx+rz*rz<=r*r)best=0;
+  return best;
+}
+function playerRayImpact(o,d,target,maxT=85){
+  const crouched=!!target.crouching;
+  const eye=target.y,foot=eye-(crouched?1.05:1.7);
+  const head=raySphereT(o,d,target.x,eye+.015,target.z,.285,maxT);
+  const body=rayCylinderT(o,d,target.x,target.z,foot+.17,eye-.245,.49,maxT);
+  if(!Number.isFinite(head)&&!Number.isFinite(body))return null;
+  // If head and chest overlap slightly, prefer the genuinely earlier intersection.
+  return head<=body?{t:head,headshot:true}:{t:body,headshot:false};
+}
+function playerShotCandidates(target,now,rewindMs){
+  // Network smoothing in the browser introduces ~50-80 ms of visual delay,
+  // on top of one-way network latency. Search only a small history window.
+  const states=target.history||[];
+  const near=states.filter(h=>now-h.at>=0&&now-h.at<=PLAYER_HISTORY_MS&&
+    Math.abs((now-h.at)-rewindMs)<=70);
+  if(!near.length&&states.length){
+    const closest=[...states].filter(h=>now-h.at>=0&&now-h.at<=PLAYER_HISTORY_MS)
+      .sort((a,b)=>Math.abs(now-a.at-rewindMs)-Math.abs(now-b.at-rewindMs))[0];
+    if(closest)near.push(closest);
+  }
+  // Always allow the authoritative current location to be hit as well.
+  return [target,...near];
+}
 const PORT = process.env.PORT || 3001;
 const rooms = new Map();
 const serverStartedAt = Date.now();
@@ -77,14 +139,14 @@ function broadcast(room, msg, except) {
     ws.send(data);
   }
 }
-function publicPlayer(p) { const { ws, ...out } = p; return out; }
+function publicPlayer(p) { const { ws, history, ...out } = p; return out; }
 function clamp(v, min, max, fallback = 0) { const n = Number(v); return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback; }
 function sortedScores(r){const a=[...(r.scores?.values()||[])];if(r.mode==='team-deathmatch'){const totals={red:0,blue:0};for(const x of a)totals[x.team]=(totals[x.team]||0)+(x.kills||0);a.sort((x,y)=>(totals[y.team]||0)-(totals[x.team]||0)||(y.kills||0)-(x.kills||0)||(x.deaths||0)-(y.deaths||0));}else a.sort((x,y)=>(y.kills||0)-(x.kills||0)||(x.deaths||0)-(y.deaths||0));return a;}
 function teamCounts(r){const c={red:0,blue:0};for(const p of r.players.values())if(p.team in c)c[p.team]++;return c;}
 function startRound(r){if(r.matchTimer||r.matchEndsAt)return;r.roundStartsAt=Date.now()+5000;r.matchEndsAt=r.roundStartsAt+210000;for(const p of r.players.values())send(p.ws,{type:'match-tick',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});r.matchTimer=setTimeout(()=>{r.matchStarted=true;for(const p of r.players.values())send(p.ws,{type:'round-start',startsAt:r.roundStartsAt,endsAt:r.matchEndsAt});r.matchEndTimer=setTimeout(()=>{r.matchFinished=true;const scores=sortedScores(r);for(const p of r.players.values())send(p.ws,{type:'match-end',scores,mode:r.mode,teamScores:r.mode==='team-deathmatch'?{red:scores.filter(x=>x.team==='red').reduce((n,x)=>n+x.kills,0),blue:scores.filter(x=>x.team==='blue').reduce((n,x)=>n+x.kills,0)}:null});},210000);r.matchEndTimer.unref?.();},5000);r.matchTimer.unref?.();}
 function broadcastTeamCounts(r){broadcast(r,{type:'team-counts',counts:teamCounts(r)});}
 wss.on('connection', ws => {
-  ws.id = crypto.randomUUID(); ws.roomCode = null; ws.lastUpdate = 0; ws.lastHit = 0; ws.lastDamageShot = 0; ws.isAlive=true; ws.on('pong',()=>{ws.isAlive=true;});
+  ws.id = crypto.randomUUID(); ws.roomCode = null; ws.lastUpdate = 0; ws.lastHit = 0; ws.lastDamageShot = 0; ws.isAlive=true;ws.roundTripMs=120;ws.lastWsPingAt=0; ws.on('pong',()=>{ws.isAlive=true;if(ws.lastWsPingAt){ws.roundTripMs=clamp(Date.now()-ws.lastWsPingAt,10,400,120);ws.lastWsPingAt=0;}});
   ws.on('message', raw => {
     if (raw.length > 8192) return;
     let m; try { m = JSON.parse(raw); } catch { return; }
@@ -124,9 +186,9 @@ wss.on('connection', ws => {
         }else if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*(35+Math.random()*12);z=(Math.random()-.5)*90;}
         else{const a=Math.random()*Math.PI*2,d=38+Math.random()*17;x=Math.cos(a)*d;z=Math.sin(a)*d;}
       }
-      const p = { id: ws.id, name, ws, x, y:1.7, z, yaw:0, pitch:0, maxHealth:100, health:100, kills:0, deaths:0, moving:false, sprinting:false, aiming:false, firing:false, map:requestedMap, mode:requestedMode, team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
+      const p = { id: ws.id, name, ws, x, y:1.7, z, yaw:0, pitch:0, maxHealth:100, health:100, kills:0, deaths:0, moving:false, sprinting:false, aiming:false, firing:false, crouching:false, history:[], map:requestedMap, mode:requestedMode, team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
       if (!r.scores) r.scores = new Map(); r.scores.set(p.id, { id:p.id, name:p.name, kills:0, deaths:0, team:p.team });
-      r.players.set(ws.id, p); startRound(r);
+      rememberPlayerPosition(p);r.players.set(ws.id, p); startRound(r);
       send(ws, { type:'joined', id:ws.id, room:code, isHost, mode:r.mode, team:p.team, spawn:{x:p.x,y:p.y,z:p.z}, matchEndsAt:r.matchEndsAt, roundStartsAt:r.roundStartsAt, scores:sortedScores(r), players:[...r.players.values()].filter(q=>q.id!==ws.id).map(publicPlayer), enemies:['deathmatch','team-deathmatch','elimination'].includes(r.mode)?[]:[...r.enemies.values()] });
       broadcast(r, { type:'join', player:publicPlayer(p), scores:sortedScores(r), teamCounts:teamCounts(r) }, ws);
       broadcast(r, { type:'count', count:r.players.size }); broadcastTeamCounts(r);
@@ -140,7 +202,8 @@ wss.on('connection', ws => {
       const now = Date.now(); if (now - ws.lastUpdate < 50) return; ws.lastUpdate = now;
       p.x = clamp(m.x, -100, 100); p.y = clamp(m.y, -5, 20, 1.7); p.z = clamp(m.z, -100, 100);
       p.yaw = clamp(m.yaw, -20, 20); p.pitch = clamp(m.pitch, -1.6, 1.6);
-      p.moving = !!m.moving; p.sprinting = !!m.sprinting; p.aiming = !!m.aiming; p.firing = !!m.firing;
+      p.moving = !!m.moving; p.sprinting = !!m.sprinting; p.aiming = !!m.aiming; p.firing = !!m.firing;p.crouching=!!m.crouching;
+      rememberPlayerPosition(p,now);
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
     if (m.type === 'respawn-request') {
@@ -153,7 +216,7 @@ wss.on('connection', ws => {
                                                       z > c.z-c.hz-.65 && z < c.z+c.hz+.65 && c.maxY>1);
       if (obstructed) return send(ws,{type:'respawn-rejected',reason:'position'});
       p.x=x;p.y=1.7;p.z=z;p.health=p.maxHealth||100;p.deadAt=0;
-      p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;
+      p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;p.crouching=false;p.history=[];rememberPlayerPosition(p);
       ws.lastUpdate=0;
       // The player AND every observer receive exactly the same authoritative new alive state.
       broadcast(r,{type:'player-respawn',player:publicPlayer(p)});
@@ -216,25 +279,26 @@ wss.on('connection', ws => {
       const weapon = ['rifle','smg','sniper'].includes(m.weapon) ? m.weapon : 'rifle';
       if(Math.hypot(ox-p.x,oy-p.y,oz-p.z)>3.8)return;
       const fireGap = weapon === 'smg' ? 60 : weapon === 'sniper' ? 5000 : 105;
-      if (now - ws.lastDamageShot >= fireGap && m.blocked !== true) {
+      // m.blocked was computed against detailed client meshes, sometimes including
+      // decorative geometry and interpolated player meshes. Never let that local
+      // guess suppress a PvP shot: server-side cover is authoritative instead.
+      if (now - ws.lastDamageShot >= fireGap) {
         ws.lastDamageShot = now;
         if (['deathmatch','team-deathmatch','elimination'].includes(r.mode)) {
-          let best = null, bestT = Infinity, bestY = 0;
+          let best=null,bestT=Infinity,headshot=false;
+          const origin={x:ox,y:oy,z:oz},dir={x:dx,y:dy,z:dz};
+          const rewindMs=Math.min(215,Math.max(80,65+ws.roundTripMs));
           for (const target of r.players.values()) {
-            if (target.id === p.id || target.health <= 0 || (r.mode==='team-deathmatch'&&target.team===p.team)) continue;
-            // Player state stores camera/eye position; use a forgiving vertical capsule for the body.
-            const cx = target.x - ox, cy = (target.y - 0.72) - oy, cz = target.z - oz;
-            const t = cx * dx + cy * dy + cz * dz;
-            if (t <= 0 || t > 85 || t >= bestT) continue;
-            const ex = cx - dx * t, ey = cy - dy * t, ez = cz - dz * t;
-            if (ex * ex + ey * ey + ez * ez <= 1.05 * 1.05) {
-              // Independent server geometry check: shooting through principal walls/containers is forbidden.
-              const origin={x:ox,y:oy,z:oz},dir={x:dx,y:dy,z:dz};
-              if(!coverBefore(r.map,origin,dir,t)) {best = target; bestT = t; bestY = oy + dy * t;}
+            if (target.id===p.id||target.health<=0||(r.mode==='team-deathmatch'&&target.team===p.team))continue;
+            for(const pose of playerShotCandidates(target,now,rewindMs)){
+              const impact=playerRayImpact(origin,dir,pose,Math.min(85,bestT));
+              if(!impact||impact.t>=bestT)continue;
+              // A rewind may help with movement, never with shooting through walls.
+              if(coverBefore(r.map,origin,dir,impact.t))continue;
+              best=target;bestT=impact.t;headshot=impact.headshot;
             }
           }
           if (best) {
-            const headshot = bestY > best.y - 0.38;
             const bodyDamage = weapon === 'smg' ? 5 : weapon === 'sniper' ? 50 : 9;
             const damage = headshot ? bodyDamage * 2 : bodyDamage;
             best.health = Math.max(0, best.health - damage);
@@ -273,5 +337,5 @@ server.on('error', err => {
   console.error('[ZONE ZERO] Impossible de démarrer le serveur :', err);
   process.exitCode = 1;
 });
-const heartbeat=setInterval(()=>{for(const ws of wss.clients){if(ws.isAlive===false){ws.terminate();continue;}ws.isAlive=false;ws.ping();}},25000);heartbeat.unref?.();
+const heartbeat=setInterval(()=>{for(const ws of wss.clients){if(ws.isAlive===false){ws.terminate();continue;}ws.isAlive=false;ws.lastWsPingAt=Date.now();ws.ping();}},25000);heartbeat.unref?.();
 server.listen(PORT, '0.0.0.0', () => console.log('ZONE ZERO server ready on 0.0.0.0:' + PORT));
