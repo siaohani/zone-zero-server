@@ -11,7 +11,7 @@ function mapSolids(map){return (MAP_COLLIDER_DATA[map]||[]).map(([x,z,hx,hz,minY
 const mapCache=new Map();
 function spawnBlocked(map,x,z,radius=.72){
  const solids=mapSolids(map);
- return solids.some(c=>x>c.x-c.hx-radius&&x<c.x+c.hx+radius&&z>c.z-c.hz-radius&&z<c.z+c.hz+radius&&c.maxY>.9);
+ return solids.some(c=>x>c.x-c.hx-radius&&x<c.x+c.hx+radius&&z>c.z-c.hz-radius&&z<c.z+c.hz+radius&&c.maxY>0.05);
 }
 function chooseRespawn(room,player,request={}){
  const limit=room.map==='shipment'?26.5:58.5;
@@ -223,18 +223,34 @@ wss.on('connection', ws => {
       broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
     if (m.type === 'respawn-request') {
-      if (!['deathmatch','team-deathmatch'].includes(r.mode) || r.matchFinished ||
-          p.health > 0 || !p.deadAt || Date.now()-p.deadAt < 3900) return;
-      // The server selects the respawn point; client coordinates are hints only.
-      // Avoid the death location, living players, and all known solid cover.
-      const spawn = chooseRespawn(r,p,m);
-      if(!spawn){send(ws,{type:'respawn-rejected'});return;}
-      p.x=spawn.x;p.y=1.7;p.z=spawn.z;p.health=p.maxHealth||100;p.deadAt=0;
-      delete p.deadX;delete p.deadZ;
-      p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;p.crouching=false;p.history=[];rememberPlayerPosition(p);
-      ws.lastUpdate=0;
-      // The player AND every observer receive exactly the same authoritative new alive state.
-      broadcast(r,{type:'player-respawn',player:publicPlayer(p)});
+      if (!['deathmatch','team-deathmatch'].includes(r.mode) || r.matchFinished || p.health > 0) return;
+      // Recover safely if an earlier death path failed to leave its cooldown marker.
+      // Never trust client position as the respawn result; it is only a candidate.
+      if (!Number.isFinite(p.deadAt) || p.deadAt <= 0) {
+        p.deadAt = Date.now();
+        p.deadX = Number.isFinite(p.x) ? p.x : 0;
+        p.deadZ = Number.isFinite(p.z) ? p.z : 0;
+      }
+      if (Date.now() - p.deadAt < 3900) return;
+      const spawn = chooseRespawn(r, p, m);
+      if (!spawn) {
+        send(ws, { type: 'respawn-rejected' });
+        return;
+      }
+      // Commit the entire new life atomically before broadcasting it.
+      p.x = spawn.x; p.y = 1.7; p.z = spawn.z;
+      p.health = Number.isFinite(p.maxHealth) && p.maxHealth > 0 ? p.maxHealth : 100;
+      p.deadAt = 0;
+      delete p.deadX; delete p.deadZ;
+      p.moving = false; p.sprinting = false; p.aiming = false; p.firing = false; p.crouching = false;
+      p.history = [];
+      rememberPlayerPosition(p);
+      ws.lastUpdate = 0;
+      // Authoritative snapshot includes the new coordinates and full health for all clients.
+      const respawned = publicPlayer(p);
+      send(ws, { type: 'player-respawn', player: respawned });
+      broadcast(r, { type: 'state', player: respawned }, ws);
+      broadcast(r, { type: 'player-respawn', player: respawned }, ws);
       return;
     }
     if (m.type === 'player-health') {
