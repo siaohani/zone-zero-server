@@ -29,45 +29,45 @@ function mapSolids(map){
  }
  return out;
 }
-function chooseRespawnPosition(room, player) {
- const limit = room.map === 'shipment' ? 24.5 : 56;
- const solids = mapSolids(room.map);
- const occupied = [...room.players.values()].filter(other => other.id !== player.id && other.health > 0);
- const isBlocked = (x,z) => solids.some(c =>
-   x > c.x-c.hx-.85 && x < c.x+c.hx+.85 &&
-   z > c.z-c.hz-.85 && z < c.z+c.hz+.85 && c.maxY > 1
- );
- const valid = (x,z) => {
-   if (Math.abs(x) > limit || Math.abs(z) > limit || isBlocked(x,z)) return false;
-   const deathX = Number.isFinite(player.deadX) ? player.deadX : player.x;
-   const deathZ = Number.isFinite(player.deadZ) ? player.deadZ : player.z;
-   if (Math.hypot(x-deathX,z-deathZ) < Math.min(10, limit*.35)) return false;
-   if (occupied.some(other => Math.hypot(x-other.x,z-other.z) < 4.5)) return false;
-   if (room.mode === 'team-deathmatch' && player.team) {
-     const expected = player.team === 'red' ? -1 : 1;
-     if (Math.sign(x) !== expected) return false;
-   }
-   return true;
- };
- for (let i=0;i<240;i++) {
-   let x=(Math.random()*2-1)*limit, z=(Math.random()*2-1)*limit;
-   if (room.mode === 'team-deathmatch' && player.team) {
-     x=(player.team === 'red' ? -1 : 1)*(room.map === 'shipment' ? 12+Math.random()*10 : 28+Math.random()*24);
-     z=(Math.random()*2-1)*(room.map === 'shipment' ? 22 : 53);
-   }
-   if (valid(x,z)) return {x,z};
- }
- // Deterministic grid fallback still checks cover, distance from death, and other players.
- for (let radius=10; radius<=limit*2; radius+=2) {
-   for (const [x,z] of [[radius,0],[-radius,0],[0,radius],[0,-radius],[radius*.7,radius*.7],[-radius*.7,-radius*.7]]) {
-     if (valid(x,z)) return {x,z};
-   }
- }
- for(let x=-Math.floor(limit);x<=Math.floor(limit);x+=2) for(let z=-Math.floor(limit);z<=Math.floor(limit);z+=2) if(valid(x,z)) return {x,z};
- return {x:0,z:room.map === 'shipment' ? -22 : -48};
-}
 // Ray vs 3D AABB using slabs. Ignore intersections beyond the target.
 const mapCache=new Map();
+function spawnBlocked(map,x,z,radius=.72){
+ const solids=mapSolids(map);
+ return solids.some(c=>x>c.x-c.hx-radius&&x<c.x+c.hx+radius&&z>c.z-c.hz-radius&&z<c.z+c.hz+radius&&c.maxY>.9);
+}
+function chooseRespawn(room,player){
+ const limit=room.map==='shipment'?26.5:58.5;
+ const oldX=Number.isFinite(player.deadX)?player.deadX:player.x;
+ const oldZ=Number.isFinite(player.deadZ)?player.deadZ:player.z;
+ const teamSide=player.mode==='team-deathmatch'?(player.team==='red'?-1:1):0;
+ const safe=(x,z)=>Math.abs(x)<=limit&&Math.abs(z)<=limit&&!spawnBlocked(room.map,x,z,.85)&&
+   Math.hypot(x-oldX,z-oldZ)>=8&&
+   [...room.players.values()].every(q=>q.id===player.id||q.health<=0||Math.hypot(x-q.x,z-q.z)>=5);
+ for(let i=0;i<500;i++){
+   let x,z;
+   if(room.map==='shipment'){
+     x=(Math.random()<.5?-1:1)*(8+Math.random()*16);z=(Math.random()*2-1)*24;
+   }else if(teamSide){x=teamSide*(24+Math.random()*31);z=(Math.random()*2-1)*55;}
+   else{x=(Math.random()*2-1)*55;z=(Math.random()*2-1)*55;}
+   if(safe(x,z))return {x,z};
+ }
+ // Deterministic fallback also checks collisions and distance; never knowingly spawn inside cover.
+ for(let x=-Math.floor(limit);x<=Math.floor(limit);x+=3)for(let z=-Math.floor(limit);z<=Math.floor(limit);z+=3){
+   if(teamSide&&Math.sign(x)!==teamSide)continue;
+   if(safe(x,z))return {x,z};
+ }
+ // If the arena is exceptionally crowded, prioritize a clear spot over the previous position.
+ for(let x=-Math.floor(limit);x<=Math.floor(limit);x+=2)for(let z=-Math.floor(limit);z<=Math.floor(limit);z+=2){
+   if(teamSide&&Math.sign(x)!==teamSide)continue;
+   if(!spawnBlocked(room.map,x,z,.85)&&Math.hypot(x-oldX,z-oldZ)>=3)return {x,z};
+ }
+ // Last resort: still require clear geometry, even if every open point is crowded.
+ for(let x=-Math.floor(limit);x<=Math.floor(limit);x+=2)for(let z=-Math.floor(limit);z<=Math.floor(limit);z+=2){
+   if(teamSide&&Math.sign(x)!==teamSide)continue;
+   if(!spawnBlocked(room.map,x,z,.85))return {x,z};
+ }
+ return {x:0,z:0};
+}
 function coverBefore(map,origin,dir,distance){
  let solids=mapCache.get(map);if(!solids){solids=mapSolids(map);mapCache.set(map,solids);}
  for(const c of solids){
@@ -223,7 +223,7 @@ wss.on('connection', ws => {
         }else if(requestedMode==='team-deathmatch'){x=(requestedTeam==='red'?-1:1)*(35+Math.random()*12);z=(Math.random()-.5)*90;}
         else{const a=Math.random()*Math.PI*2,d=38+Math.random()*17;x=Math.cos(a)*d;z=Math.sin(a)*d;}
       }
-      const p = { id: ws.id, name, ws, x, y:1.7, z, yaw:0, pitch:0, maxHealth:100, health:100, spawnVersion:0, kills:0, deaths:0, moving:false, sprinting:false, aiming:false, firing:false, crouching:false, history:[], map:requestedMap, mode:requestedMode, team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
+      const p = { id: ws.id, name, ws, x, y:1.7, z, yaw:0, pitch:0, maxHealth:100, health:100, kills:0, deaths:0, moving:false, sprinting:false, aiming:false, firing:false, crouching:false, history:[], map:requestedMap, mode:requestedMode, team:requestedMode==='team-deathmatch'?requestedTeam:null, isHost };
       if (!r.scores) r.scores = new Map(); r.scores.set(p.id, { id:p.id, name:p.name, kills:0, deaths:0, team:p.team });
       rememberPlayerPosition(p);r.players.set(ws.id, p); startRound(r);
       send(ws, { type:'joined', id:ws.id, room:code, isHost, mode:r.mode, team:p.team, spawn:{x:p.x,y:p.y,z:p.z}, matchEndsAt:r.matchEndsAt, roundStartsAt:r.roundStartsAt, scores:sortedScores(r), players:[...r.players.values()].filter(q=>q.id!==ws.id).map(publicPlayer), enemies:['deathmatch','team-deathmatch','elimination'].includes(r.mode)?[]:[...r.enemies.values()] });
@@ -236,7 +236,7 @@ wss.on('connection', ws => {
     const r = rooms.get(ws.roomCode); const p = r?.players.get(ws.id); if (!r || !p) return;
     if (m.type === 'state') {
       if (r.mode !== 'coop' && p.health <= 0) return;
-      const now = Date.now(); if (!m.respawn && now - ws.lastUpdate < 50) return; ws.lastUpdate = now;
+      const now = Date.now(); if (now - ws.lastUpdate < 50) return; ws.lastUpdate = now;
       p.x = clamp(m.x, -100, 100); p.y = clamp(m.y, -5, 20, 1.7); p.z = clamp(m.z, -100, 100);
       p.yaw = clamp(m.yaw, -20, 20); p.pitch = clamp(m.pitch, -1.6, 1.6);
       p.moving = !!m.moving; p.sprinting = !!m.sprinting; p.aiming = !!m.aiming; p.firing = !!m.firing;p.crouching=!!m.crouching;
@@ -246,9 +246,11 @@ wss.on('connection', ws => {
     if (m.type === 'respawn-request') {
       if (!['deathmatch','team-deathmatch'].includes(r.mode) || r.matchFinished ||
           p.health > 0 || !p.deadAt || Date.now()-p.deadAt < 3900) return;
-      // Choose a fresh authoritative spawn away from the death location, cover, and other players.
-      const spawn = chooseRespawnPosition(r,p);
-      p.x=spawn.x;p.y=1.7;p.z=spawn.z;p.health=p.maxHealth||100;p.spawnVersion=(p.spawnVersion||0)+1;p.deadAt=0;p.deadX=undefined;p.deadZ=undefined;
+      // The server selects the respawn point; client coordinates are hints only.
+      // Avoid the death location, living players, and all known solid cover.
+      const spawn = chooseRespawn(r,p);
+      p.x=spawn.x;p.y=1.7;p.z=spawn.z;p.health=p.maxHealth||100;p.deadAt=0;
+      delete p.deadX;delete p.deadZ;
       p.moving=false;p.sprinting=false;p.aiming=false;p.firing=false;p.crouching=false;p.history=[];rememberPlayerPosition(p);
       ws.lastUpdate=0;
       // The player AND every observer receive exactly the same authoritative new alive state.
@@ -256,22 +258,14 @@ wss.on('connection', ws => {
       return;
     }
     if (m.type === 'player-health') {
-      // Reject health packets from an older life; they can otherwise overwrite a respawn.
-      const incomingVersion = Number.isFinite(Number(m.spawnVersion)) ? Number(m.spawnVersion) : (p.spawnVersion||0);
-      if (incomingVersion < (p.spawnVersion||0)) return;
-      if (r.mode !== 'coop') {
-        if (p.health > 0 || !p.deadAt || Date.now()-p.deadAt < 3900 || r.mode === 'elimination') return;
-        if (clamp(m.health,0,100) !== 100) return;
-        p.deadAt = 0;
-        p.spawnVersion = Math.max(p.spawnVersion||0, incomingVersion);
-        // Coop/local-style health packets must never be able to move a competitive spawn.
-      } else if (incomingVersion > (p.spawnVersion||0)) {
-        p.spawnVersion = incomingVersion;
+      // In competitive play the server owns health; only a real death allows a timed respawn.
+      if(r.mode!=='coop') {
+        if(p.health>0 || !p.deadAt || Date.now()-p.deadAt<3900 || r.mode==='elimination')return;
+        if(clamp(m.health,0,100)!==100)return;
+        p.deadAt=0;
       }
-      p.health = clamp(m.health, 0, p.maxHealth || 100);
-      if (p.health > 0 && r.mode !== 'coop') broadcast(r, {type:'player-respawn', player:publicPlayer(p)});
-      broadcast(r, {type:'player-health', id:p.id, health:p.health, spawnVersion:p.spawnVersion||0}, ws);
-      broadcast(r, {type:'state', player:publicPlayer(p)}, ws); return;
+      p.health = clamp(m.health, 0, p.maxHealth || 100); if(p.health>0&&r.mode!=='coop')broadcast(r,{type:'player-respawn',player:publicPlayer(p)}); broadcast(r, { type: 'player-health', id: p.id, health: p.health }, ws);
+      broadcast(r, { type: 'state', player: publicPlayer(p) }, ws); return;
     }
     if (m.type === 'score-request') { send(ws, { type:'scoreboard', scores:[...(r.scores?.values() || [])] }); return; }
     // Obsolete client-side damage reports are intentionally ignored.
@@ -306,8 +300,8 @@ wss.on('connection', ws => {
       const now=Date.now();if(now-(ws.lastEnemyPlayerHit||0)<650)return;ws.lastEnemyPlayerHit=now;
       const enemy=r.enemies.get(String(m.enemyId||''));if(!enemy||enemy.dead||Math.hypot(target.x-enemy.x,target.z-enemy.z)>4.5)return;
       const damage=clamp(m.damage,1,5,3);target.health=Math.max(0,target.health-damage);
-      if(target.health<=0){const score=r.scores.get(target.id);if(score)score.deaths++;send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:0,damage,spawnVersion:target.spawnVersion||0});broadcast(r,{type:'killfeed',killerName:'HOSTILE',victimName:target.name||'Opérateur',weapon:'BOT'});broadcast(r,{type:'scoreboard',scores:sortedScores(r)});}
-      else send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:target.health,damage,spawnVersion:target.spawnVersion||0});
+      if(target.health<=0){const score=r.scores.get(target.id);if(score)score.deaths++;send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:0,damage});broadcast(r,{type:'killfeed',killerName:'HOSTILE',victimName:target.name||'Opérateur',weapon:'BOT'});broadcast(r,{type:'scoreboard',scores:sortedScores(r)});}
+      else send(target.ws,{type:'player-damaged',target:target.id,attacker:'bot',health:target.health,damage});
       broadcast(r,{type:'state',player:publicPlayer(target)});return;
     }
     if (m.type === 'shot') {
@@ -348,11 +342,10 @@ wss.on('connection', ws => {
               const killerScore = r.scores.get(p.id), victimScore = r.scores.get(best.id);
               if (killerScore) killerScore.kills++;
               if (victimScore) victimScore.deaths++;
-              send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: 0, damage, spawnVersion: best.spawnVersion||0 });
-              send(best.ws, { type: 'player-killed', target: best.id, attacker: p.id, attackerName: p.name || 'Opérateur', spawnVersion: best.spawnVersion||0 }); broadcast(r,{type:'killfeed',killerName:p.name||'Opérateur',victimName:best.name||'Opérateur',weapon:weapon.toUpperCase(),team:p.team||null});
-            } else send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: best.health, damage, spawnVersion: best.spawnVersion||0 });
+              send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: 0, damage });
+              send(best.ws, { type: 'player-killed', target: best.id, attacker: p.id, attackerName: p.name || 'Opérateur' }); broadcast(r,{type:'killfeed',killerName:p.name||'Opérateur',victimName:best.name||'Opérateur',weapon:weapon.toUpperCase(),team:p.team||null});
+            } else send(best.ws, { type: 'player-damaged', target: best.id, attacker: p.id, health: best.health, damage });
             broadcast(r, { type: 'state', player: publicPlayer(best) });
-            broadcast(r, { type: 'player-health', id: best.id, health: best.health }, best.ws);
             broadcast(r, { type: 'player-hit-confirmed', attacker: p.id, target: best.id, health: best.health, damage, headshot, weapon });
             broadcast(r, { type: 'scoreboard', scores: [...r.scores.values()] });
           }
